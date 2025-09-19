@@ -1,0 +1,1 @@
+-- FASE 1: se llenará con datos de ejemplo (no ejecutar todavía)
