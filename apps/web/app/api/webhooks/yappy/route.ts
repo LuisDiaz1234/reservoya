@@ -1,4 +1,3 @@
-// apps/web/app/api/webhooks/yappy/route.ts
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -25,25 +24,20 @@ export async function GET(req: Request) {
   const status = searchParams.get('status') || '';
   const hash = searchParams.get('hash') || '';
   const domain = searchParams.get('domain') || '';
+  const confirmationNumber = searchParams.get('confirmationNumber') || '';
 
-  const basePayload = { orderId, status, domain, hash_len: hash.length };
+  const basePayload = { orderId, status, domain, confirmationNumber };
 
   if (!orderId || !status || !hash || !domain) {
     await supabaseAdmin.from('events').insert({
-      workspace_id: null,
-      source: 'webhook',
-      type: 'yappy.ipn.bad_request',
-      payload: basePayload
+      workspace_id: null, source: 'webhook', type: 'yappy.ipn.bad_request', payload: basePayload
     });
     return NextResponse.json({ ok: false, error: 'params inválidos' }, { status: 400 });
   }
 
   const verified = verifyHash(orderId, status, domain, hash);
   await supabaseAdmin.from('events').insert({
-    workspace_id: null,
-    source: 'webhook',
-    type: 'yappy.ipn.received',
-    payload: { ...basePayload, verified }
+    workspace_id: null, source: 'webhook', type: 'yappy.ipn.received', payload: { ...basePayload, verified }
   });
 
   if (!verified) {
@@ -59,27 +53,40 @@ export async function GET(req: Request) {
 
   if (!payment) {
     await supabaseAdmin.from('events').insert({
-      workspace_id: null,
-      source: 'webhook',
-      type: 'yappy.ipn.not_found',
-      payload: basePayload
+      workspace_id: null, source: 'webhook', type: 'yappy.ipn.not_found', payload: basePayload
     });
     return NextResponse.json({ ok: true, note: 'payment no encontrado' });
   }
 
   if (status === 'E') {
-    if (payment.status !== 'PAID') {
-      await supabaseAdmin.rpc('mark_payment_paid', {
-        p_payment_id: payment.id,
-        p_external_payment_id: orderId,
-        p_raw_payload: { query: Object.fromEntries(searchParams.entries()) }
+    // Llamamos al RPC y registramos resultado
+    const { error: rpcErr } = await supabaseAdmin.rpc('mark_payment_paid', {
+      p_payment_id: payment.id,
+      p_external_payment_id: confirmationNumber || orderId,
+      p_raw_payload: { query: Object.fromEntries(searchParams.entries()) }
+    });
+
+    if (rpcErr) {
+      await supabaseAdmin.from('events').insert({
+        workspace_id: payment.workspace_id || null,
+        source: 'webhook',
+        type: 'webhook.mark_payment_paid.error',
+        payload: { ...basePayload, rpc_error: rpcErr.message, payment_id: payment.id }
       });
+      return NextResponse.json({ ok: false, error: 'rpc error', detail: rpcErr.message }, { status: 500 });
     }
+
+    await supabaseAdmin.from('events').insert({
+      workspace_id: payment.workspace_id || null,
+      source: 'webhook',
+      type: 'webhook.mark_payment_paid.ok',
+      payload: { ...basePayload, payment_id: payment.id }
+    });
   } else {
     await supabaseAdmin.from('events').insert({
       workspace_id: payment.workspace_id || null,
       source: 'webhook',
-      type: 'yappy.ipn.status_' + status,
+      type: `yappy.ipn.status_${status}`,
       payload: basePayload
     });
   }
