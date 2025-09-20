@@ -1,3 +1,4 @@
+// apps/web/app/api/webhooks/yappy/route.ts
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -5,6 +6,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+// Firma HMAC: sha256( secretKeyPart + (orderId + status + domain) )
 function verifyHash(orderId: string, status: string, domain: string, hash: string) {
   const secretB64 = process.env.YAPPY_SECRET_KEY!;
   if (!secretB64) return false;
@@ -20,14 +22,17 @@ function verifyHash(orderId: string, status: string, domain: string, hash: strin
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const orderId = searchParams.get('orderId') || '';
-  const status = searchParams.get('status') || '';
-  const hash = searchParams.get('hash') || '';
-  const domain = searchParams.get('domain') || '';
-  const confirmationNumber = searchParams.get('confirmationNumber') || '';
 
-  const basePayload = { orderId, status, domain, confirmationNumber };
+  // Yappy puede enviar orderId o ozxId (según flujo)
+  const orderId = (searchParams.get('orderId') || searchParams.get('ozxId') || '').trim();
+  const status = (searchParams.get('status') || '').trim().toUpperCase();
+  const hash = (searchParams.get('hash') || '').trim();
+  const domain = (searchParams.get('domain') || '').trim();
+  const confirmationNumber = (searchParams.get('confirmationNumber') || '').trim();
 
+  const basePayload = { orderId, status, domain, confirmationNumber, raw: Object.fromEntries(searchParams.entries()) };
+
+  // Validación básica
   if (!orderId || !status || !hash || !domain) {
     await supabaseAdmin.from('events').insert({
       workspace_id: null, source: 'webhook', type: 'yappy.ipn.bad_request', payload: basePayload
@@ -44,26 +49,27 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: 'firma inválida' }, { status: 401 });
   }
 
-  const { data: payment } = await supabaseAdmin
+  // Buscar el payment por external_reference = orderId/ozxId
+  const { data: payment, error: pErr } = await supabaseAdmin
     .from('payments')
     .select('id, booking_id, status, workspace_id')
     .eq('provider', 'YAPPY')
     .eq('external_reference', orderId)
     .maybeSingle();
 
-  if (!payment) {
+  if (pErr || !payment) {
     await supabaseAdmin.from('events').insert({
-      workspace_id: null, source: 'webhook', type: 'yappy.ipn.not_found', payload: basePayload
+      workspace_id: null, source: 'webhook', type: 'yappy.ipn.not_found', payload: { ...basePayload, db_error: pErr?.message }
     });
     return NextResponse.json({ ok: true, note: 'payment no encontrado' });
   }
 
+  // Solo marcamos pagado cuando status = E (Ejecutado)
   if (status === 'E') {
-    // Llamamos al RPC y registramos resultado
     const { error: rpcErr } = await supabaseAdmin.rpc('mark_payment_paid', {
       p_payment_id: payment.id,
       p_external_payment_id: confirmationNumber || orderId,
-      p_raw_payload: { query: Object.fromEntries(searchParams.entries()) }
+      p_raw_payload: basePayload
     });
 
     if (rpcErr) {
