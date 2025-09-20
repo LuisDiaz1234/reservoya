@@ -1,86 +1,78 @@
 // apps/web/app/api/cron/notifications/process/route.ts
-import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { NextResponse } from 'next/server';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getTwilioClient } from '@/lib/twilio';
+import { normalizePA } from '@/lib/phone';
 
-// ¡Este handler debe correr en Node.js, no en Edge!
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
-type OutboxItem = {
-  id: string;
-  workspace_id: string;
-  channel: string;
-  to_whatsapp: string;
-  body_text: string;
-  attempts: number;
-};
+const MAX_PER_RUN = 20;
+const MAX_ATTEMPTS = 3;
 
-function assertEnv(...keys: string[]) {
-  for (const k of keys) {
-    if (!process.env[k]) throw new Error(`Falta env var ${k}`);
+function assertAuth(url: URL) {
+  const key = url.searchParams.get('key') || '';
+  if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {
+    return false;
   }
+  return true;
 }
 
 export async function GET(req: Request) {
-  // Seguridad simple: token por query (?key=CRON_SECRET)
   const url = new URL(req.url);
-  const qKey = url.searchParams.get("key");
-  const secret = process.env.CRON_SECRET;
-  if (!secret || qKey !== secret) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!assertAuth(url)) {
+    return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
 
-  try {
-    // 1) Tomar mensajes pendientes (PENDING) y marcarlos SENDING
-    const { data: items, error: claimErr } = await supabaseAdmin.rpc("outbox_claim", { p_limit: 20 });
-    if (claimErr) throw new Error(`outbox_claim: ${claimErr.message}`);
+  // Toma mensajes pendientes cuyo scheduled_at <= ahora
+  const { data: rows, error } = await supabaseAdmin
+    .from('notification_outbox')
+    .select('id, workspace_id, to_phone, body, template, payload, attempts')
+    .eq('status', 'PENDING')
+    .lte('scheduled_at', new Date().toISOString())
+    .order('scheduled_at', { ascending: true })
+    .limit(MAX_PER_RUN);
 
-    const list = (items || []) as OutboxItem[];
-    if (list.length === 0) {
-      return NextResponse.json({ ok: true, taken: 0, sent: 0, retried: 0 });
-    }
-
-    // 2) Twilio client
-    assertEnv("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM");
-    const accountSid = process.env.TWILIO_ACCOUNT_SID!;
-    const authToken = process.env.TWILIO_AUTH_TOKEN!;
-    const from = process.env.TWILIO_WHATSAPP_FROM!;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const client = require("twilio")(accountSid, authToken);
-
-    let sent = 0, retried = 0;
-    for (const m of list) {
-      try {
-        if (m.channel !== "whatsapp") {
-          // Reprobamos a DEAD si el canal no es soportado
-          await supabaseAdmin.rpc("outbox_mark_retry", { p_id: m.id, p_error: `Canal no soportado: ${m.channel}` });
-          retried++;
-          continue;
-        }
-        const to = m.to_whatsapp.startsWith("whatsapp:") ? m.to_whatsapp : `whatsapp:${m.to_whatsapp}`;
-
-        const res = await client.messages.create({
-          from,
-          to,
-          body: m.body_text,
-        });
-
-        await supabaseAdmin.rpc("outbox_mark_sent", {
-          p_id: m.id,
-          p_provider_message_id: res.sid,
-        });
-        sent++;
-      } catch (e: any) {
-        await supabaseAdmin.rpc("outbox_mark_retry", {
-          p_id: m.id,
-          p_error: e?.message || String(e),
-        });
-        retried++;
-      }
-    }
-
-    return NextResponse.json({ ok: true, taken: list.length, sent, retried });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
+  if (!rows || rows.length === 0) {
+    return NextResponse.json({ ok: true, taken: 0, sent: 0, retried: 0, dead: 0 });
+  }
+
+  const client = getTwilioClient();
+  const from = process.env.TWILIO_WHATSAPP_FROM!;
+  let sent = 0, retried = 0, dead = 0;
+
+  for (const msg of rows) {
+    const to = normalizePA(msg.to_phone || '');
+    if (!to) {
+      // Sin teléfono: márcalo como DEAD y registra error
+      await supabaseAdmin.from('notification_outbox')
+        .update({ status: 'DEAD', error: 'missing to_phone' })
+        .eq('id', msg.id);
+      dead++;
+      continue;
+    }
+    try {
+      await client.messages.create({
+        from,
+        to,
+        body: msg.body || 'Notificación'
+      });
+      await supabaseAdmin.from('notification_outbox')
+        .update({ status: 'SENT', error: null })
+        .eq('id', msg.id);
+      sent++;
+    } catch (e: any) {
+      const attempts = (msg.attempts ?? 0) + 1;
+      const newStatus = attempts >= MAX_ATTEMPTS ? 'DEAD' : 'RETRY';
+      await supabaseAdmin.from('notification_outbox')
+        .update({ status: newStatus, attempts, error: e?.message || String(e) })
+        .eq('id', msg.id);
+      if (newStatus === 'DEAD') dead++; else retried++;
+    }
+  }
+
+  return NextResponse.json({ ok: true, taken: rows.length, sent, retried, dead });
 }
