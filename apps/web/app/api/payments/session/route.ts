@@ -8,27 +8,24 @@ function moneyFromCents(cents: number) {
   return (cents / 100).toFixed(2);
 }
 function shortOrderId(fromUuid: string) {
-  return 'B' + fromUuid.replace(/-/g, '').slice(0, 14); // máx 15 chars
+  return 'B' + fromUuid.replace(/-/g, '').slice(0, 14); // ≤ 15 chars
 }
 
 export async function POST(req: Request) {
   try {
     const { bookingId } = await req.json() as { bookingId: string };
-
     if (!bookingId) {
       return NextResponse.json({ error: 'bookingId requerido' }, { status: 400 });
     }
 
-    // 1) Traer booking para conocer depósito
+    // 1) Traer booking con su depósito
     const { data: booking, error: be } = await supabaseAdmin
       .from('bookings')
-      .select('id, workspace_id, customer_name, customer_phone, start_at, status, deposit_cents, currency')
+      .select('id, workspace_id, customer_name, customer_phone, deposit_cents, currency')
       .eq('id', bookingId)
       .single();
 
-    if (be || !booking) {
-      return NextResponse.json({ error: 'booking no encontrada' }, { status: 404 });
-    }
+    if (be || !booking) return NextResponse.json({ error: 'booking no encontrada' }, { status: 404 });
     if (!booking.deposit_cents || booking.deposit_cents <= 0) {
       return NextResponse.json({ error: 'booking sin depósito definido' }, { status: 400 });
     }
@@ -47,21 +44,20 @@ export async function POST(req: Request) {
       .select()
       .single();
 
-    if (pe || !payment) {
-      return NextResponse.json({ error: 'no se pudo crear payment' }, { status: 500 });
-    }
+    if (pe || !payment) return NextResponse.json({ error: 'no se pudo crear payment' }, { status: 500 });
 
-    // 3) Llamadas a Yappy
+    // 3) Configuración Yappy
     const API_BASE = process.env.YAPPY_API_BASE!;
     const merchantId = process.env.YAPPY_MERCHANT_ID!;
     const domain = process.env.YAPPY_DOMAIN || process.env.APP_BASE_URL!;
     const baseUrl = process.env.APP_BASE_URL!;
+    const testAlias = (process.env.YAPPY_TEST_ALIAS || '').trim(); // SOLO para programa de pruebas
 
     if (!API_BASE || !merchantId || !domain || !baseUrl) {
       return NextResponse.json({ error: 'Yappy no está configurado en variables de entorno' }, { status: 500 });
     }
 
-    // Paso 1: validar comercio -> obtener token
+    // Paso 1: validar comercio → obtener token
     const vRes = await fetch(`${API_BASE}/payments/validate/merchant`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -71,12 +67,19 @@ export async function POST(req: Request) {
     const vJson = await vRes.json();
     const token = vJson?.body?.token as string | undefined;
     if (!token) {
+      await supabaseAdmin.from('events').insert({
+        workspace_id: booking.workspace_id,
+        source: 'yappy',
+        type: 'validate.error',
+        payload: { vJson, merchantId, domain }
+      });
       return NextResponse.json({ error: 'No se obtuvo token de Yappy', detail: vJson }, { status: 502 });
     }
 
     // Paso 2: crear orden
     const orderId = shortOrderId(payment.id);
     const ipnUrl = `${baseUrl}/api/webhooks/yappy`;
+
     const payload: Record<string, any> = {
       merchantId,
       orderId,
@@ -86,8 +89,9 @@ export async function POST(req: Request) {
       discount: '0.00',
       taxes: '0.00',
       subtotal: moneyFromCents(booking.deposit_cents),
-      total: moneyFromCents(booking.deposit_cents)
+      total: moneyFromCents(booking.deposit_cents),
     };
+    if (testAlias) payload.aliasYappy = testAlias; // requerido cuando usas programa de pruebas
 
     const oRes = await fetch(`${API_BASE}/payments/payment-wc`, {
       method: 'POST',
@@ -99,24 +103,30 @@ export async function POST(req: Request) {
       cache: 'no-store',
     });
     const oJson = await oRes.json();
-    const body = oJson?.body;
-    if (!body?.transactionId || !body?.token || !body?.documentName) {
+
+    // Si falla, registrar y devolver detalle (para ver el YAPPY-004 y causa)
+    if (!oRes.ok || !oJson?.body?.transactionId || !oJson?.body?.token || !oJson?.body?.documentName) {
+      await supabaseAdmin.from('events').insert({
+        workspace_id: booking.workspace_id,
+        source: 'yappy',
+        type: 'order.error',
+        payload: { request: payload, response: oJson }
+      });
       return NextResponse.json({ error: 'No se pudo crear orden en Yappy', detail: oJson }, { status: 502 });
     }
 
-    // Guardar referencia del proveedor (orderId) e info cruda
+    // Guardar referencia del proveedor
     await supabaseAdmin
       .from('payments')
       .update({ external_reference: orderId, raw_payload: oJson })
       .eq('id', payment.id);
 
-    // Devolver info para el botón
     return NextResponse.json({
       provider: 'YAPPY',
       yappy: {
-        transactionId: body.transactionId,
-        token: body.token,
-        documentName: body.documentName,
+        transactionId: oJson.body.transactionId,
+        token: oJson.body.token,
+        documentName: oJson.body.documentName,
       },
       paymentId: payment.id,
     });
