@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/notifications/process?key=luisd",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
