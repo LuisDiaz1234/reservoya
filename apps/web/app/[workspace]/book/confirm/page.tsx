@@ -1,11 +1,6 @@
-// apps/web/app/[workspace]/book/confirm/page.tsx
-import YappyButton from '@/components/YappyButton';
+import PayBox from '@/components/PayBox';
 
 export const dynamic = 'force-dynamic';
-
-function money(cents: number) {
-  return new Intl.NumberFormat('es-PA', { style: 'currency', currency: 'USD' }).format((cents || 0) / 100);
-}
 
 export default async function ConfirmPage({
   params,
@@ -23,21 +18,13 @@ export default async function ConfirmPage({
       <p className="text-sm text-gray-600">Workspace: <span className="font-mono">{params.workspace}</span></p>
       <p className="text-sm text-gray-600">Reserva: <span className="font-mono">{bookingId || '(desconocida)'}</span></p>
 
-      <div className="rounded-2xl border p-4">
-        <h2 className="text-lg font-semibold mb-2">Pagar con Yappy</h2>
-        {bookingId ? (
-          <>
-            <p className="text-sm mb-2">Se abrirá el flujo de Yappy en una ventana/modal.</p>
-            <YappyButton bookingId={bookingId} />
-          </>
-        ) : (
+      {bookingId ? (
+        <PayBox bookingId={bookingId} defaultDepositCents={depositCents || 0} />
+      ) : (
+        <div className="rounded-2xl border p-4">
           <p className="text-red-600 text-sm">Falta bookingId en la URL.</p>
-        )}
-      </div>
-
-      <p className="text-xs text-gray-500">
-        Depósito estimado: <strong>{money(depositCents)}</strong>
-      </p>
+        </div>
+      )}
     </div>
   );
 }
