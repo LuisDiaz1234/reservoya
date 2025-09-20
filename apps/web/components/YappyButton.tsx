@@ -1,4 +1,3 @@
-// apps/web/components/YappyButton.tsx
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
@@ -24,32 +23,34 @@ export default function YappyButton({ bookingId }: Props) {
           body: JSON.stringify({ bookingId }),
         });
         const j = await r.json();
+
+        if (!r.ok) {
+          const msg = j?.error || 'Error al crear sesión';
+          const detail = typeof j?.detail === 'string' ? j.detail : JSON.stringify(j?.detail || {});
+          alert(`Error backend: ${msg}\nDetalle: ${detail}`);
+          return;
+        }
+
         const y = j?.yappy;
         if (y?.transactionId && y?.token && y?.documentName) {
-          // @ts-ignore (API del web component)
+          // @ts-ignore Web Component oficial
           (btnRef.current as any).eventPayment({
             transactionId: y.transactionId,
             token: y.token,
             documentName: y.documentName,
           });
         } else {
-          alert('No se pudo iniciar Yappy');
+          alert('Respuesta incompleta de Yappy (falta transactionId/token/documentName)');
         }
-      } catch (e) {
-        console.error(e);
-        alert('Error iniciando Yappy');
+      } catch (e: any) {
+        alert(`Error iniciando Yappy: ${e?.message || e}`);
       } finally {
         setLoading(false);
       }
     };
 
-    const onSuccess = () => {
-      // La confirmación real llega por IPN
-      alert('Pago en proceso. Recibirás confirmación.');
-    };
-    const onError = () => {
-      alert('El pago no pudo completarse.');
-    };
+    const onSuccess = () => { alert('Pago en proceso. Recibirás confirmación.'); };
+    const onError = (e: any) => { alert(`Yappy reportó error: ${e?.detail ? JSON.stringify(e.detail) : 'desconocido'}`); };
 
     btnRef.current.addEventListener('eventClick', onClick);
     btnRef.current.addEventListener('eventSuccess', onSuccess);
@@ -66,6 +67,7 @@ export default function YappyButton({ bookingId }: Props) {
   return (
     <>
       <Script id="yappy-cdn" type="module" src={cdn} strategy="afterInteractive" />
+      {/* @ts-ignore declarado en custom-elements.d.ts */}
       <btn-yappy theme="blue" rounded="true" style={{ opacity: loading ? 0.6 : 1, pointerEvents: loading ? 'none' : 'auto' }} />
     </>
   );
