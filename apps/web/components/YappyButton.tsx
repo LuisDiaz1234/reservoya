@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import Script from 'next/script';
 
-type Props = { bookingId: string };
+type Props = { bookingId: string; testOneCent?: boolean };
 
-export default function YappyButton({ bookingId }: Props) {
+export default function YappyButton({ bookingId, testOneCent = false }: Props) {
   const [loading, setLoading] = useState(false);
   const btnRef = useRef<HTMLElement | null>(null);
   const cdn = process.env.NEXT_PUBLIC_YAPPY_BUTTON_CDN || 'https://bt-cdn.yappy.cloud/v1/cdn/web-component-btn-yappy.js';
@@ -20,7 +20,7 @@ export default function YappyButton({ bookingId }: Props) {
         const r = await fetch('/api/payments/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bookingId }),
+          body: JSON.stringify({ bookingId, testOneCent }),
         });
         const j = await r.json();
 
@@ -62,7 +62,7 @@ export default function YappyButton({ bookingId }: Props) {
       btnRef.current.removeEventListener('eventSuccess', onSuccess);
       btnRef.current.removeEventListener('eventError', onError);
     };
-  }, [bookingId]);
+  }, [bookingId, testOneCent]);
 
   return (
     <>
