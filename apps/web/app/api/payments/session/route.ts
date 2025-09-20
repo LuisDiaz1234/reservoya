@@ -1,4 +1,3 @@
-// apps/web/app/api/payments/session/route.ts
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -13,7 +12,10 @@ function shortOrderId(fromUuid: string) {
 
 export async function POST(req: Request) {
   try {
-    const { bookingId } = await req.json() as { bookingId: string };
+    const body = await req.json();
+    const bookingId = body?.bookingId as string | undefined;
+    const testOneCent = Boolean(body?.testOneCent);
+
     if (!bookingId) {
       return NextResponse.json({ error: 'bookingId requerido' }, { status: 400 });
     }
@@ -30,34 +32,37 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'booking sin depósito definido' }, { status: 400 });
     }
 
-    // 2) Crear payment PENDING
+    // 2) Determinar el monto a cobrar
+    const amountCents = testOneCent ? 1 : Number(booking.deposit_cents);
+
+    // 3) Crear payment PENDING con ese monto
     const { data: payment, error: pe } = await supabaseAdmin
       .from('payments')
       .insert({
         booking_id: booking.id,
         workspace_id: booking.workspace_id,
-        amount_cents: booking.deposit_cents,
+        amount_cents: amountCents,
         status: 'PENDING',
         provider: 'YAPPY',
-        raw_payload: null
+        raw_payload: { testOneCent }
       })
       .select()
       .single();
 
     if (pe || !payment) return NextResponse.json({ error: 'no se pudo crear payment' }, { status: 500 });
 
-    // 3) Configuración Yappy
+    // 4) Configuración Yappy
     const API_BASE = process.env.YAPPY_API_BASE!;
     const merchantId = process.env.YAPPY_MERCHANT_ID!;
     const domain = process.env.YAPPY_DOMAIN || process.env.APP_BASE_URL!;
     const baseUrl = process.env.APP_BASE_URL!;
-    const testAlias = (process.env.YAPPY_TEST_ALIAS || '').trim(); // SOLO para programa de pruebas
+    const testAlias = (process.env.YAPPY_TEST_ALIAS || '').trim(); // opcional
 
     if (!API_BASE || !merchantId || !domain || !baseUrl) {
       return NextResponse.json({ error: 'Yappy no está configurado en variables de entorno' }, { status: 500 });
     }
 
-    // Paso 1: validar comercio → obtener token
+    // 5) Validar comercio → token
     const vRes = await fetch(`${API_BASE}/payments/validate/merchant`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -76,7 +81,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No se obtuvo token de Yappy', detail: vJson }, { status: 502 });
     }
 
-    // Paso 2: crear orden
+    // 6) Crear orden
     const orderId = shortOrderId(payment.id);
     const ipnUrl = `${baseUrl}/api/webhooks/yappy`;
 
@@ -88,10 +93,10 @@ export async function POST(req: Request) {
       ipnUrl,
       discount: '0.00',
       taxes: '0.00',
-      subtotal: moneyFromCents(booking.deposit_cents),
-      total: moneyFromCents(booking.deposit_cents),
+      subtotal: moneyFromCents(amountCents),
+      total: moneyFromCents(amountCents),
     };
-    if (testAlias) payload.aliasYappy = testAlias; // requerido cuando usas programa de pruebas
+    if (testAlias) payload.aliasYappy = testAlias;
 
     const oRes = await fetch(`${API_BASE}/payments/payment-wc`, {
       method: 'POST',
@@ -104,7 +109,6 @@ export async function POST(req: Request) {
     });
     const oJson = await oRes.json();
 
-    // Si falla, registrar y devolver detalle (para ver el YAPPY-004 y causa)
     if (!oRes.ok || !oJson?.body?.transactionId || !oJson?.body?.token || !oJson?.body?.documentName) {
       await supabaseAdmin.from('events').insert({
         workspace_id: booking.workspace_id,
@@ -115,7 +119,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No se pudo crear orden en Yappy', detail: oJson }, { status: 502 });
     }
 
-    // Guardar referencia del proveedor
+    // 7) Guardar referencia y devolver datos al botón
     await supabaseAdmin
       .from('payments')
       .update({ external_reference: orderId, raw_payload: oJson })
