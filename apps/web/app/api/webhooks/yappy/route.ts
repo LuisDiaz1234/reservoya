@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { normalizePA } from '@/lib/phone';
+import { processOutbox } from '@/lib/outbox';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,11 +14,7 @@ function verifyHash(idForSign: string, status: string, domain: string, hash: str
   const decoded = Buffer.from(secretB64, 'base64').toString('utf-8');
   const key = decoded.split('.')[0];
   const signature = crypto.createHmac('sha256', key).update(idForSign + status + domain).digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(hash));
-  } catch {
-    return false;
-  }
+  try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(hash)); } catch { return false; }
 }
 
 function fmtDatePanama(iso: string) {
@@ -27,11 +24,9 @@ function fmtDatePanama(iso: string) {
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-
   const orderId = (searchParams.get('orderId') || '').trim();
   const ozxId = (searchParams.get('ozxId') || '').trim();
   const idForSign = (orderId || ozxId).trim();
-
   const status = (searchParams.get('status') || '').trim().toUpperCase();
   const domain = (searchParams.get('domain') || '').trim();
   const hash = (searchParams.get('hash') || '').trim();
@@ -48,7 +43,7 @@ export async function GET(req: Request) {
   await supabaseAdmin.from('events').insert({ workspace_id: null, source: 'webhook', type: 'yappy.ipn.received', payload: { ...payload, verified } });
   if (!verified) return NextResponse.json({ ok: false, error: 'firma inválida' }, { status: 401 });
 
-  // Buscar payment por external_reference; fallback al PENDING más reciente (<=15m)
+  // Buscar payment
   let { data: payment } = await supabaseAdmin
     .from('payments')
     .select('id, booking_id, workspace_id, status, created_at')
@@ -56,17 +51,13 @@ export async function GET(req: Request) {
     .eq('external_reference', idForSign)
     .maybeSingle();
 
+  // Fallback: link al PENDING más reciente (<=15m)
   if (!payment && status === 'E') {
     const fifteenAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const fb = await supabaseAdmin
-      .from('payments')
-      .select('id, booking_id, workspace_id, status, created_at')
-      .eq('provider', 'YAPPY')
-      .eq('status', 'PENDING')
-      .gte('created_at', fifteenAgo)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .from('payments').select('id, booking_id, workspace_id, status, created_at')
+      .eq('provider', 'YAPPY').eq('status', 'PENDING').gte('created_at', fifteenAgo)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (fb.data) {
       await supabaseAdmin.from('payments').update({ external_reference: idForSign }).eq('id', fb.data.id);
       payment = fb.data;
@@ -81,11 +72,8 @@ export async function GET(req: Request) {
     await supabaseAdmin.from('events').insert({ workspace_id: null, source: 'webhook', type: 'yappy.ipn.not_found', payload });
     return NextResponse.json({ ok: true, note: 'payment no encontrado' });
   }
-
   if (status !== 'E') {
-    await supabaseAdmin.from('events').insert({
-      workspace_id: payment.workspace_id || null, source: 'webhook', type: `yappy.ipn.status_${status}`, payload
-    });
+    await supabaseAdmin.from('events').insert({ workspace_id: payment.workspace_id || null, source: 'webhook', type: `yappy.ipn.status_${status}`, payload });
     return NextResponse.json({ ok: true });
   }
 
@@ -95,7 +83,6 @@ export async function GET(req: Request) {
       .update({ status: 'PAID', external_payment_id: confirmationNumber || idForSign, raw_payload: payload })
       .eq('id', payment.id);
 
-    // Obtener booking para mensajes
     const { data: booking } = await supabaseAdmin
       .from('bookings')
       .select('id, workspace_id, customer_phone, start_at')
@@ -106,7 +93,7 @@ export async function GET(req: Request) {
       .update({ payment_status: 'PAID', status: 'CONFIRMED' })
       .eq('id', payment.booking_id);
 
-    // 2) Encolar WhatsApp si hay teléfono
+    // 2) Encolar WhatsApp (confirmación ahora + recordatorios)
     if (booking?.customer_phone) {
       const to = normalizePA(booking.customer_phone);
       if (to) {
@@ -114,10 +101,9 @@ export async function GET(req: Request) {
         const bodyConfirm = `✅ Reserva confirmada.\nFecha: ${startTxt}\nGracias por reservar con ReservoYA.`;
         const now = new Date();
 
-        // Confirmación inmediata
         await supabaseAdmin.from('notification_outbox').insert({
           workspace_id: booking.workspace_id,
-          to_phone: to.replace('whatsapp:', ''), // guardamos sin el prefijo, lo agrega el cron
+          to_phone: to.replace('whatsapp:', ''),
           template: 'booking_confirmed',
           body: bodyConfirm,
           payload: { booking_id: booking.id },
@@ -125,7 +111,6 @@ export async function GET(req: Request) {
           scheduled_at: now.toISOString()
         });
 
-        // Recordatorios 24h y 3h antes (si la fecha es futura)
         if (booking.start_at) {
           const start = new Date(booking.start_at);
           const r24 = new Date(start.getTime() - 24 * 60 * 60 * 1000);
@@ -147,10 +132,12 @@ export async function GET(req: Request) {
             });
           }
         }
+
+        // 3) ENVÍO INMEDIATO: procesar outbox solo para esta booking (confirmación ahora)
+        await processOutbox({ max: 5, onlyBookingId: booking.id, onlyImmediate: true });
       }
     }
 
-    // Eventos OK
     await supabaseAdmin.from('events').insert([
       { workspace_id: payment.workspace_id || null, source: 'webhook', type: 'webhook.paid.ok',  ref: payment.id, payload },
       { workspace_id: payment.workspace_id || null, source: 'webhook', type: 'booking.confirmed', ref: payment.booking_id, payload: { orderId: idForSign, confirmationNumber } }
