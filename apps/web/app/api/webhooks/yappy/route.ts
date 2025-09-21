@@ -8,16 +8,26 @@ import { processOutbox } from '@/lib/outbox';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-// === UTIL: parsear horas como Panamá cuando vienen sin zona ===
-function toDateInPanama(iso: string) {
+// Fuerza a interpretar cualquier string (con o sin Z) como HORA LOCAL DE PANAMÁ
+function forcePanamaDate(iso: string | null | undefined) {
   if (!iso) return null;
-  const hasTZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(iso); // ya tiene Z u offset
-  const src = hasTZ ? iso : `${iso.replace(' ', 'T')}-05:00`; // asumir hora local Panamá
-  return new Date(src);
+  // Extrae AAAA-MM-DD HH:MM[:SS] ignorando la zona si estuviera
+  const m = String(iso).replace('T', ' ').match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/
+  );
+  if (!m) {
+    // último recurso: usa Date normal (puede venir bien formado ya)
+    return new Date(iso);
+  }
+  const [, y, mo, d, hh, mi, ss] = m;
+  // Convierte esa hora local de Panamá a UTC sumando +5h
+  const utc = Date.UTC(+y, +mo - 1, +d, +hh + 5, +mi, +(ss || '0'));
+  return new Date(utc);
 }
-function fmtDatePanama(iso: string) {
-  const d = toDateInPanama(iso);
+function fmtDatePanamaLikeLocal(iso: string | null | undefined) {
+  const d = forcePanamaDate(iso);
   if (!d) return '';
+  // Muestra en horario de Panamá
   return d.toLocaleString('es-PA', {
     timeZone: 'America/Panama',
     dateStyle: 'medium',
@@ -63,7 +73,7 @@ export async function GET(req: Request) {
     .eq('external_reference', idForSign)
     .maybeSingle();
 
-  // Fallback: link al PENDING más reciente (<=15m)
+  // Fallback: enlaza al PENDING más reciente (<=15m)
   if (!payment && status === 'E') {
     const fifteenAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const fb = await supabaseAdmin
@@ -105,12 +115,14 @@ export async function GET(req: Request) {
       .update({ payment_status: 'PAID', status: 'CONFIRMED' })
       .eq('id', payment.booking_id);
 
-    // 2) Encolar WhatsApp (confirmación ahora + recordatorios con hora correcta)
+    // 2) WhatsApp (usar hora tratada como Panamá)
     if (booking?.customer_phone) {
       const to = normalizePA(booking.customer_phone);
       if (to) {
-        const startTxt = booking.start_at ? fmtDatePanama(booking.start_at) : '';
         const now = new Date();
+        const startLocal = forcePanamaDate(booking.start_at);
+        const startTxt = fmtDatePanamaLikeLocal(booking.start_at);
+
         const bodyConfirm = `✅ Reserva confirmada.\nFecha: ${startTxt}\nGracias por reservar con ReservoYA.`;
 
         await supabaseAdmin.from('notification_outbox').insert({
@@ -123,11 +135,10 @@ export async function GET(req: Request) {
           scheduled_at: now.toISOString()
         });
 
-        if (booking.start_at) {
-          const start = toDateInPanama(booking.start_at)!; // interpretar como hora Panamá
-          const r24 = new Date(start.getTime() - 24 * 60 * 60 * 1000);
-          const r3  = new Date(start.getTime() -  3 * 60 * 60 * 1000);
-          const startTxt2 = start.toLocaleString('es-PA', { timeZone: 'America/Panama', dateStyle: 'medium', timeStyle: 'short' });
+        if (startLocal) {
+          const r24 = new Date(startLocal.getTime() - 24 * 60 * 60 * 1000);
+          const r3  = new Date(startLocal.getTime() -  3 * 60 * 60 * 1000);
+          const startTxt2 = startLocal.toLocaleString('es-PA', { timeZone: 'America/Panama', dateStyle: 'medium', timeStyle: 'short' });
           const body24 = `⏰ Recordatorio: tu reserva es el ${startTxt2} (24h).`;
           const body3  = `⏰ Recordatorio: tu reserva es el ${startTxt2} (3h).`;
 
@@ -147,7 +158,7 @@ export async function GET(req: Request) {
           }
         }
 
-        // 3) Envío inmediato de la confirmación
+        // Envío inmediato de confirmación
         await processOutbox({ max: 5, onlyBookingId: booking.id, onlyImmediate: true });
       }
     }
