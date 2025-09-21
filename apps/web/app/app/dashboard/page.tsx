@@ -11,8 +11,6 @@ type Row = {
   start_at: string | null;
   status: string;
   payment_status: string;
-  provider_id: string | null;
-  service_id: string | null;
 };
 
 function fmt(iso: string | null) {
@@ -56,23 +54,32 @@ export default async function DashboardPage() {
     return <div className="text-red-600">No autenticado.</div>;
   }
 
-  // Traemos reservas recientes (últimos 7 días y próximas 14) para métricas y tabla
+  // Rango para métricas
   const now = new Date();
   const past = new Date(now.getTime() - 7*24*60*60*1000).toISOString();
   const future = new Date(now.getTime() + 14*24*60*60*1000).toISOString();
 
-  const { data: rows } = await supabaseAdmin
+  // ⚠️ Solo columnas que existen en todas las instalaciones
+  const { data: rows, error } = await supabaseAdmin
     .from('bookings')
-    .select('id, customer_name, customer_phone, start_at, status, payment_status, provider_id, service_id')
+    .select('id, customer_name, customer_phone, start_at, status, payment_status')
     .eq('workspace_id', workspace_id)
     .gte('start_at', past)
     .lte('start_at', future)
     .order('start_at', { ascending: true })
     .limit(200);
 
-  const list = rows || [];
+  if (error) {
+    // Muestra el error en pantalla en vez de crashear
+    return (
+      <div className="max-w-2xl mx-auto p-4 border rounded bg-white">
+        <h1 className="text-lg font-semibold mb-2">Error cargando reservas</h1>
+        <p className="text-sm text-red-700">{error.message}</p>
+      </div>
+    );
+  }
 
-  // Métricas
+  const list: Row[] = rows || [];
   const todayList = list.filter(r => isTodayPanama(r.start_at));
   const paid = list.filter(r => r.payment_status === 'PAID').length;
   const pending = list.filter(r => r.payment_status !== 'PAID').length;
@@ -107,12 +114,11 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* Filtro simple (solo UI por ahora) */}
+      {/* Filtro visual placeholder */}
       <section className="rounded-2xl border bg-white p-3 shadow-sm">
         <div className="flex flex-col md:flex-row gap-3 items-center">
-          <input placeholder="Buscar cliente o teléfono…" className="w-full md:w-80 border rounded-lg px-3 py-2 text-sm"
-                 onChange={() => { /* placeholder - se puede mejorar con client components */ }} />
-          <div className="text-xs text-gray-500">* Filtro visual (si quieres filtro real, lo hacemos con un Client Component)</div>
+          <input placeholder="Buscar cliente o teléfono…" className="w-full md:w-80 border rounded-lg px-3 py-2 text-sm" />
+          <div className="text-xs text-gray-500">* Filtro visual</div>
         </div>
       </section>
 
@@ -146,12 +152,8 @@ export default async function DashboardPage() {
                     <td className="px-3 py-2">{fmt(r.start_at)}</td>
                     <td className="px-3 py-2">{r.customer_name || '-'}</td>
                     <td className="px-3 py-2">{r.customer_phone || '-'}</td>
-                    <td className="px-3 py-2">
-                      <Badge tone={paidTone as any}>{r.payment_status}</Badge>
-                    </td>
-                    <td className="px-3 py-2">
-                      <Badge tone={stTone as any}>{r.status}</Badge>
-                    </td>
+                    <td className="px-3 py-2"><Badge tone={paidTone as any}>{r.payment_status}</Badge></td>
+                    <td className="px-3 py-2"><Badge tone={stTone as any}>{r.status}</Badge></td>
                     <td className="px-3 py-2">
                       <div className="flex gap-2">
                         <form action="/api/app/bookings/confirm" method="post">
