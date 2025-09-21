@@ -8,6 +8,23 @@ import { processOutbox } from '@/lib/outbox';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+// === UTIL: parsear horas como Panamá cuando vienen sin zona ===
+function toDateInPanama(iso: string) {
+  if (!iso) return null;
+  const hasTZ = /[zZ]|[+\-]\d{2}:\d{2}$/.test(iso); // ya tiene Z u offset
+  const src = hasTZ ? iso : `${iso.replace(' ', 'T')}-05:00`; // asumir hora local Panamá
+  return new Date(src);
+}
+function fmtDatePanama(iso: string) {
+  const d = toDateInPanama(iso);
+  if (!d) return '';
+  return d.toLocaleString('es-PA', {
+    timeZone: 'America/Panama',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+}
+
 function verifyHash(idForSign: string, status: string, domain: string, hash: string) {
   const secretB64 = process.env.YAPPY_SECRET_KEY!;
   if (!secretB64) return false;
@@ -15,11 +32,6 @@ function verifyHash(idForSign: string, status: string, domain: string, hash: str
   const key = decoded.split('.')[0];
   const signature = crypto.createHmac('sha256', key).update(idForSign + status + domain).digest('hex');
   try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(hash)); } catch { return false; }
-}
-
-function fmtDatePanama(iso: string) {
-  const d = new Date(iso);
-  return d.toLocaleString('es-PA', { timeZone: 'America/Panama', dateStyle: 'medium', timeStyle: 'short' });
 }
 
 export async function GET(req: Request) {
@@ -93,13 +105,13 @@ export async function GET(req: Request) {
       .update({ payment_status: 'PAID', status: 'CONFIRMED' })
       .eq('id', payment.booking_id);
 
-    // 2) Encolar WhatsApp (confirmación ahora + recordatorios)
+    // 2) Encolar WhatsApp (confirmación ahora + recordatorios con hora correcta)
     if (booking?.customer_phone) {
       const to = normalizePA(booking.customer_phone);
       if (to) {
         const startTxt = booking.start_at ? fmtDatePanama(booking.start_at) : '';
-        const bodyConfirm = `✅ Reserva confirmada.\nFecha: ${startTxt}\nGracias por reservar con ReservoYA.`;
         const now = new Date();
+        const bodyConfirm = `✅ Reserva confirmada.\nFecha: ${startTxt}\nGracias por reservar con ReservoYA.`;
 
         await supabaseAdmin.from('notification_outbox').insert({
           workspace_id: booking.workspace_id,
@@ -112,11 +124,13 @@ export async function GET(req: Request) {
         });
 
         if (booking.start_at) {
-          const start = new Date(booking.start_at);
+          const start = toDateInPanama(booking.start_at)!; // interpretar como hora Panamá
           const r24 = new Date(start.getTime() - 24 * 60 * 60 * 1000);
-          const r3 = new Date(start.getTime() - 3 * 60 * 60 * 1000);
-          const body24 = `⏰ Recordatorio: tu reserva es el ${startTxt} (24h).`;
-          const body3 = `⏰ Recordatorio: tu reserva es a las ${startTxt} (3h).`;
+          const r3  = new Date(start.getTime() -  3 * 60 * 60 * 1000);
+          const startTxt2 = start.toLocaleString('es-PA', { timeZone: 'America/Panama', dateStyle: 'medium', timeStyle: 'short' });
+          const body24 = `⏰ Recordatorio: tu reserva es el ${startTxt2} (24h).`;
+          const body3  = `⏰ Recordatorio: tu reserva es el ${startTxt2} (3h).`;
+
           if (r24 > now) {
             await supabaseAdmin.from('notification_outbox').insert({
               workspace_id: booking.workspace_id, to_phone: to.replace('whatsapp:', ''),
@@ -133,7 +147,7 @@ export async function GET(req: Request) {
           }
         }
 
-        // 3) ENVÍO INMEDIATO: procesar outbox solo para esta booking (confirmación ahora)
+        // 3) Envío inmediato de la confirmación
         await processOutbox({ max: 5, onlyBookingId: booking.id, onlyImmediate: true });
       }
     }
