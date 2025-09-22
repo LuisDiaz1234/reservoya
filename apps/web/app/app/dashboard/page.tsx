@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic';
 import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import DashboardFilters from '@/components/DashboardFilters';
-import SelectBulk from '@/components/SelectBulk';
+import BookingsTable from '@/components/BookingsTable';
 
 type Row = {
   id: string;
@@ -15,12 +15,6 @@ type Row = {
   payment_status: string;
 };
 
-function fmt(iso: string | null) {
-  if (!iso) return '-';
-  const d = new Date(iso);
-  return d.toLocaleString('es-PA', { timeZone: 'America/Panama', dateStyle: 'short', timeStyle: 'short' });
-}
-
 function isTodayPanama(iso: string | null) {
   if (!iso) return false;
   const d = new Date(iso);
@@ -28,16 +22,6 @@ function isTodayPanama(iso: string | null) {
   const today = new Date().toLocaleDateString('es-PA', opts);
   const that  = d.toLocaleDateString('es-PA', opts);
   return today === that;
-}
-
-function Badge({ children, tone }: { children: React.ReactNode; tone: 'green'|'amber'|'red'|'slate' }) {
-  const tones: Record<string, string> = {
-    green: 'bg-green-100 text-green-800 border-green-200',
-    amber: 'bg-amber-100 text-amber-800 border-amber-200',
-    red:   'bg-rose-100 text-rose-800 border-rose-200',
-    slate: 'bg-slate-100 text-slate-800 border-slate-200'
-  };
-  return <span className={`px-2 py-0.5 rounded-full text-xs border ${tones[tone]}`}>{children}</span>;
 }
 
 function toISOEdge(dateStr?: string | null) {
@@ -61,21 +45,50 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     return <div className="text-red-600">No autenticado.</div>;
   }
 
+  // Listas para filtros (si existen)
+  const [{ data: services = [] }, { data: providers = [] }] = await Promise.all([
+    supabaseAdmin.from('services').select('id,name').eq('workspace_id', workspace_id).order('name', { ascending: true }),
+    supabaseAdmin.from('providers').select('id,name').eq('workspace_id', workspace_id).order('name', { ascending: true }),
+  ]);
+
   const from = toISOEdge(searchParams.from);
-  const to = toISOEdge(searchParams.to);
-  const q = (searchParams.q || '').trim();
+  const to   = toISOEdge(searchParams.to);
+  const q    = (searchParams.q || '').trim();
+  const serviceId   = (searchParams.serviceId || '').trim();
+  const providerId  = (searchParams.providerId || '').trim();
 
-  let qb = supabaseAdmin
-    .from('bookings')
-    .select('id, customer_name, customer_phone, start_at, status, payment_status')
-    .eq('workspace_id', workspace_id)
-    .order('start_at', { ascending: true });
+  // Intento con service_id/provider_id y fallback si no existen
+  async function fetchBookings(tryWithRelations: boolean) {
+    const baseSelect = tryWithRelations
+      ? 'id, customer_name, customer_phone, start_at, status, payment_status, service_id, provider_id'
+      : 'id, customer_name, customer_phone, start_at, status, payment_status';
 
-  if (from) qb = qb.gte('start_at', from);
-  if (to) qb = qb.lte('start_at', new Date(new Date(to).getTime() + 24*60*60*1000).toISOString());
-  if (q) qb = qb.or(`customer_name.ilike.%${q}%,customer_phone.ilike.%${q}%`);
+    let qb = supabaseAdmin
+      .from('bookings')
+      .select(baseSelect)
+      .eq('workspace_id', workspace_id)
+      .order('start_at', { ascending: true });
 
-  const { data: rows, error } = await qb.limit(500);
+    if (from) qb = qb.gte('start_at', from);
+    if (to) qb = qb.lte('start_at', new Date(new Date(to).getTime() + 24*60*60*1000).toISOString());
+    if (q) qb = qb.or(`customer_name.ilike.%${q}%,customer_phone.ilike.%${q}%`);
+    if (tryWithRelations && serviceId)  qb = qb.eq('service_id', serviceId);
+    if (tryWithRelations && providerId) qb = qb.eq('provider_id', providerId);
+
+    return qb.limit(500);
+  }
+
+  let { data: rows, error } = await fetchBookings(true);
+  let showService = true, showProvider = true;
+
+  if (error && /does not exist/i.test(error.message)) {
+    // Vuelve a intentar sin esas columnas
+    const r2 = await fetchBookings(false);
+    rows = r2.data ?? [];
+    error = r2.error ?? null;
+    showService = false;
+    showProvider = false;
+  }
 
   if (error) {
     return (
@@ -86,12 +99,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
     );
   }
 
-  const list: Row[] = rows || [];
+  const list: Row[] = (rows as any[]) || [];
   const todayList = list.filter(r => isTodayPanama(r.start_at));
   const paid = list.filter(r => r.payment_status === 'PAID').length;
   const pending = list.filter(r => r.payment_status !== 'PAID').length;
   const confirmed = list.filter(r => r.status === 'CONFIRMED').length;
-  const ids = list.map(r => r.id);
 
   return (
     <div className="space-y-6">
@@ -104,7 +116,12 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
 
       {/* Filtros */}
       <section className="rounded-2xl border bg-white p-3 shadow-sm">
-        <DashboardFilters />
+        <DashboardFilters
+          services={services as any}
+          providers={providers as any}
+          showService={showService}
+          showProvider={showProvider}
+        />
       </section>
 
       {/* Métricas */}
@@ -127,62 +144,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
         </div>
       </section>
 
-      {/* Tabla + acciones masivas */}
-      <section className="rounded-2xl border bg-white shadow-sm overflow-hidden">
-        <SelectBulk ids={ids} />
-        <div className="max-h-[70vh] overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-gray-50 border-b text-xs text-gray-600">
-              <tr>
-                <th className="text-left px-3 py-2">Sel.</th>
-                <th className="text-left px-3 py-2">Fecha/Hora</th>
-                <th className="text-left px-3 py-2">Cliente</th>
-                <th className="text-left px-3 py-2">Teléfono</th>
-                <th className="text-left px-3 py-2">Pago</th>
-                <th className="text-left px-3 py-2">Estado</th>
-                <th className="text-left px-3 py-2">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {list.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="px-3 py-6 text-center text-gray-500">Sin reservas en el rango.</td>
-                </tr>
-              )}
-              {list.map((r, idx) => {
-                const paidTone = r.payment_status === 'PAID' ? 'green' : 'amber';
-                const stTone =
-                  r.status === 'CONFIRMED' ? 'green' :
-                  r.status === 'CANCELLED' ? 'red' : 'slate';
-                return (
-                  <tr key={r.id} className={idx % 2 ? 'bg-white' : 'bg-gray-50/50'}>
-                    <td className="px-3 py-2">
-                      <input type="checkbox" onChange={() => (globalThis as any).toggleBulkRow?.(r.id)} />
-                    </td>
-                    <td className="px-3 py-2">{fmt(r.start_at)}</td>
-                    <td className="px-3 py-2">{r.customer_name || '-'}</td>
-                    <td className="px-3 py-2">{r.customer_phone || '-'}</td>
-                    <td className="px-3 py-2"><Badge tone={paidTone as any}>{r.payment_status}</Badge></td>
-                    <td className="px-3 py-2"><Badge tone={stTone as any}>{r.status}</Badge></td>
-                    <td className="px-3 py-2">
-                      <div className="flex gap-2">
-                        <form action="/api/app/bookings/confirm" method="post">
-                          <input type="hidden" name="id" value={r.id} />
-                          <button className="px-2 py-1 text-xs rounded-lg border hover:bg-gray-50">Confirmar</button>
-                        </form>
-                        <form action="/api/app/bookings/cancel" method="post">
-                          <input type="hidden" name="id" value={r.id} />
-                          <button className="px-2 py-1 text-xs rounded-lg border hover:bg-gray-50 text-rose-700">Cancelar</button>
-                        </form>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      {/* Tabla (Client Component) */}
+      <BookingsTable rows={list} />
     </div>
   );
 }
