@@ -1,66 +1,51 @@
-import { NextResponse } from "next/server";
-import { supabaseService } from "@/lib/supabase/server";
+// apps/web/app/api/public/bookings/route.ts
+import { NextResponse } from 'next/server';
+import { bookingPublicSchema } from '@/lib/validation';
+import { normalizePA } from '@/lib/phone';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { checkRate } from '@/lib/rateLimit';
 
-/**
- * POST JSON:
- * {
- *   "workspaceSlug": "demo-salon",
- *   "serviceId": "uuid",
- *   "providerId": "uuid",
- *   "startAt": "2025-09-22T15:00:00-05:00" (o ISO con Z; servidor lo pasa tal cual a RPC),
- *   "customerName": "string",
- *   "customerPhone": "string",
- *   "customerEmail": "string|null"
- * }
- */
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
 export async function POST(req: Request) {
-  const s = supabaseService();
+  const ip = (req.headers.get('x-forwarded-for') || '').split(',')[0] || 'unknown';
+  const rate = await checkRate(ip, '/api/public/bookings', 10, 60); // 10 req/min
+  if (!rate.allowed) {
+    return NextResponse.json({ error: 'Rate limit excedido.' }, { status: 429 });
+  }
+
   let body: any;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
+    return NextResponse.json({ error: 'JSON inválido' }, { status: 400 });
   }
 
-  const {
-    workspaceSlug,
-    serviceId,
-    providerId,
-    startAt,
-    customerName,
-    customerPhone,
-    customerEmail
-  } = body || {};
-
-  if (!workspaceSlug || !serviceId || !providerId || !startAt || !customerName || !customerPhone) {
-    return NextResponse.json({ error: "Faltan campos obligatorios" }, { status: 400 });
+  const parsed = bookingPublicSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Validación', details: parsed.error.flatten() }, { status: 400 });
   }
 
-  // Validar que el workspace existe y permite público
-  const { data: ws } = await s
-    .from("workspaces")
-    .select("id, public_booking_enabled")
-    .eq("slug", (workspaceSlug as string).toLowerCase())
-    .single();
+  const input = parsed.data;
+  const phone = normalizePA(input.customerPhone);
 
-  if (!ws || !ws.public_booking_enabled) {
-    return NextResponse.json({ error: "Workspace no disponible para reservas" }, { status: 400 });
-  }
-
-  // Llamar a la RPC (SECURITY DEFINER)
-  const { data, error } = await s.rpc("create_booking_public", {
-    p_workspace_slug: (workspaceSlug as string).toLowerCase(),
-    p_service_id: serviceId,
-    p_provider_id: providerId,
-    p_start_at: new Date(startAt).toISOString(),
-    p_customer_name: customerName,
-    p_customer_phone: customerPhone,
-    p_customer_email: customerEmail || null
+  // Llamamos la RPC pública (SECURITY DEFINER) para crear la reserva PENDING
+  const { data, error } = await supabaseAdmin.rpc('create_booking_public', {
+    p_workspace_slug: input.workspace,
+    p_service_id: input.serviceId,
+    p_provider_id: input.providerId ?? null,
+    p_customer_name: input.customerName,
+    p_customer_phone: phone.replace('whatsapp:', ''), // guardamos sin el prefijo
+    p_start_at_local: input.startAt, // server normaliza a tz Panamá
+    p_notes: input.notes ?? null
   });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+    console.error('booking.create.error', { error: error.message });
+    return NextResponse.json({ error: 'No se pudo crear la reserva.' }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, result: data });
+  console.info('booking.created', { booking_id: data?.booking_id, workspace: input.workspace });
+  return NextResponse.json({ ok: true, bookingId: data?.booking_id });
 }
