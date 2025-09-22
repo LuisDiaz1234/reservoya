@@ -1,3 +1,4 @@
+# .github/workflows/ci.yml
 name: CI
 
 on:
@@ -6,44 +7,46 @@ on:
   pull_request:
     branches: [ "main" ]
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build-web:
     name: Build apps/web (Next.js)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-    # Todas las ejecuciones se harán dentro de apps/web
     defaults:
       run:
         working-directory: apps/web
+
+    env:
+      # Reales para CI (copiados como secrets)
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+      # Solo para que el build compile en CI (placeholders)
+      YAPPY_PUBLIC_API_KEY: "DUMMY"
+      YAPPY_PRIVATE_API_KEY: "DUMMY"
+      YAPPY_HASH_SECRET: "DUMMY"
+      TWILIO_ACCOUNT_SID: "DUMMY"
+      TWILIO_AUTH_TOKEN: "DUMMY"
+      TWILIO_WHATSAPP_FROM: "whatsapp:+50700000000"
+      CRON_SECRET: "DUMMY"
+
+      # Hace el build más rápido en CI
+      NEXT_TELEMETRY_DISABLED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Use Node.js 18
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 18
           cache: "npm"
           cache-dependency-path: "apps/web/package-lock.json"
 
-      - name: Install dependencies
+      - name: Install deps
         run: npm ci
 
       - name: Build
-        env:
-          # Si existen secretos, se usarán; si no, se ponen placeholders seguros para build
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || 'https://demo.supabase.co' }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'anon_demo_key' }}
-          YAPPY_PUBLIC_API_KEY: ${{ secrets.YAPPY_PUBLIC_API_KEY || 'placeholder' }}
-          YAPPY_PRIVATE_API_KEY: ${{ secrets.YAPPY_PRIVATE_API_KEY || 'placeholder' }}
-          YAPPY_HASH_SECRET: ${{ secrets.YAPPY_HASH_SECRET || 'placeholder' }}
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID || 'placeholder' }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN || 'placeholder' }}
-          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM || 'whatsapp:+15005550006' }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET || 'local-ci' }}
         run: npm run build
