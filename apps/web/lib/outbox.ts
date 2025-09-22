@@ -9,7 +9,7 @@ type OutboxRow = {
   to_phone: string | null;
   template: string | null;
   body: string | null;
-  payload: any;
+  payload: any; // jsonb
   status: string;
   attempts: number;
   scheduled_at: string | null;
@@ -39,9 +39,17 @@ export async function enqueueNotification(args: {
   if (error) throw new Error(error.message);
 }
 
-export async function processOutboxBatch(limit = 20) {
+type ProcessOpts = {
+  max?: number;
+  onlyImmediate?: boolean; // ignoramos; ya filtramos por scheduled_at <= now
+  onlyBookingId?: string;  // filtra payload.booking_id == X
+  workspaceId?: string;    // filtra por workspace_id
+};
+
+export async function processOutboxBatch(limit = 20, filters?: { onlyBookingId?: string; workspaceId?: string }) {
   const nowIso = new Date().toISOString();
-  const { data: rows, error } = await supabaseAdmin
+
+  let qb = supabaseAdmin
     .from('notification_outbox')
     .select('id, workspace_id, to_phone, template, body, payload, status, attempts, scheduled_at')
     .eq('status', 'PENDING')
@@ -49,12 +57,23 @@ export async function processOutboxBatch(limit = 20) {
     .order('created_at', { ascending: true })
     .limit(limit);
 
+  if (filters?.workspaceId) {
+    qb = qb.eq('workspace_id', filters.workspaceId);
+  }
+  if (filters?.onlyBookingId) {
+    // requiere que al encolar hayamos guardado { booking_id: '...' } en payload
+    qb = qb.contains('payload', { booking_id: filters.onlyBookingId });
+  }
+
+  const { data: rows, error } = await qb;
   if (error) throw new Error(error.message);
 
   let sent = 0, retried = 0, dead = 0;
+
   for (const r of (rows ?? []) as OutboxRow[]) {
     const to = (r.to_phone || '').trim();
     const body = (r.body || '').trim();
+
     if (!to || !body) {
       await supabaseAdmin
         .from('notification_outbox')
@@ -102,10 +121,16 @@ export async function processOutboxBatch(limit = 20) {
 }
 
 /**
- * Compatibilidad: acepta número (límite) o { max, onlyImmediate }.
- * Ignoramos onlyImmediate (enviamos lo elegible a la hora actual).
+ * Compatibilidad: acepta número (límite) o { max, onlyImmediate, onlyBookingId, workspaceId }.
  */
-export async function processOutbox(arg?: number | { max?: number; onlyImmediate?: boolean }) {
-  const limit = typeof arg === 'number' ? arg : (arg?.max ?? 20);
-  return processOutboxBatch(limit);
+export async function processOutbox(arg?: number | ProcessOpts) {
+  if (typeof arg === 'number') {
+    return processOutboxBatch(arg);
+  }
+  const max = arg?.max ?? 20;
+  const filters = {
+    onlyBookingId: arg?.onlyBookingId,
+    workspaceId: arg?.workspaceId,
+  };
+  return processOutboxBatch(max, filters);
 }
