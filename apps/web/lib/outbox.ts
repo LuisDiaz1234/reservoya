@@ -56,10 +56,14 @@ export async function processOutboxBatch(limit = 20) {
     const to = (r.to_phone || '').trim();
     const body = (r.body || '').trim();
     if (!to || !body) {
-      // invalida: márcala DEAD
       await supabaseAdmin
         .from('notification_outbox')
-        .update({ status: 'DEAD', attempts: (r.attempts || 0) + 1, error: 'missing to/body', updated_at: new Date().toISOString() })
+        .update({
+          status: 'DEAD',
+          attempts: (r.attempts || 0) + 1,
+          error: 'missing to/body',
+          updated_at: new Date().toISOString()
+        })
         .eq('id', r.id);
       dead++;
       continue;
@@ -69,7 +73,12 @@ export async function processOutboxBatch(limit = 20) {
       await sendWhatsApp({ to, body });
       await supabaseAdmin
         .from('notification_outbox')
-        .update({ status: 'SENT', attempts: (r.attempts || 0) + 1, sent_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .update({
+          status: 'SENT',
+          attempts: (r.attempts || 0) + 1,
+          sent_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
         .eq('id', r.id);
       sent++;
     } catch (e: any) {
@@ -81,7 +90,6 @@ export async function processOutboxBatch(limit = 20) {
           status: isDead ? 'DEAD' : 'RETRY',
           attempts,
           error: String(e?.message || e),
-          // si RETRY, reprograma a +5min
           scheduled_at: isDead ? r.scheduled_at : new Date(Date.now() + 5 * 60 * 1000).toISOString(),
           updated_at: new Date().toISOString()
         })
@@ -91,4 +99,12 @@ export async function processOutboxBatch(limit = 20) {
   }
 
   return { processed: rows?.length || 0, sent, retried, dead };
+}
+
+/**
+ * Compatibilidad con rutas que importan { processOutbox }.
+ * Delegamos al batch para no cambiar nada más.
+ */
+export async function processOutbox(limit = 20) {
+  return processOutboxBatch(limit);
 }
