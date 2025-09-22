@@ -28,11 +28,17 @@ export default function CreateServiceTool() {
           durationMinutes: Number(state.duration),
           priceUsd: Number(state.price),
           depositType: state.depType,
-          depositValue: state.depVal
+          depositValue: Number(state.depVal)
         })
       });
-      const json = await res.json();
-      setResult({ status: res.status, json });
+
+      // Intentar JSON, si falla, caemos a texto
+      let data: any;
+      const text = await res.text();
+      try { data = JSON.parse(text); }
+      catch { data = { ok: false, raw: text }; }
+
+      setResult({ status: res.status, json: data });
     } catch (e: any) {
       setResult({ status: 0, json: { ok: false, error: String(e?.message || e) } });
     } finally {
@@ -45,6 +51,15 @@ export default function CreateServiceTool() {
       <h1 className="text-xl font-semibold">Crear servicio (herramienta rápida)</h1>
       <p className="text-sm text-gray-600">Usa tu <b>CRON_SECRET</b> para autorizar.</p>
 
+      <div className="rounded border p-3 bg-gray-50 text-sm">
+        <div className="font-medium mb-1">PRUEBA RÁPIDA</div>
+        <ol className="list-decimal ml-5 space-y-1">
+          <li>En otra pestaña, abre: <code>/api/tools/create-service?key=TU_CRON_SECRET</code>.</li>
+          <li>Si ves <code>{"{ ok: true, method: 'GET' }"}</code>, la key es correcta.</li>
+          <li>Luego envía el formulario de abajo.</li>
+        </ol>
+      </div>
+
       <form onSubmit={handleSubmit} className="space-y-3">
         <div>
           <label className="block text-sm font-medium">Admin key (CRON_SECRET)</label>
@@ -52,7 +67,7 @@ export default function CreateServiceTool() {
             value={state.key}
             onChange={e => setState(s => ({ ...s, key: e.target.value }))}
             className="border rounded px-3 py-2 w-full"
-            placeholder="tu-secreto-cron"
+            placeholder="Pega aquí el CRON_SECRET exacto desde Vercel"
             required
           />
         </div>
@@ -74,7 +89,7 @@ export default function CreateServiceTool() {
             value={state.name}
             onChange={e => setState(s => ({ ...s, name: e.target.value }))}
             className="border rounded px-3 py-2 w-full"
-            placeholder="Color + Corte"
+            placeholder="Uñas / Color + Corte"
             required
           />
         </div>
