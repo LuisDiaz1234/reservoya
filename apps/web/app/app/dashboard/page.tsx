@@ -3,6 +3,8 @@ export const dynamic = 'force-dynamic';
 
 import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import DashboardFilters from '@/components/DashboardFilters';
+import SelectBulk from '@/components/SelectBulk';
 
 type Row = {
   id: string;
@@ -38,7 +40,12 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: 'green'|'a
   return <span className={`px-2 py-0.5 rounded-full text-xs border ${tones[tone]}`}>{children}</span>;
 }
 
-export default async function DashboardPage() {
+function toISOEdge(dateStr?: string | null) {
+  if (!dateStr) return null;
+  try { return new Date(dateStr + 'T00:00:00Z').toISOString(); } catch { return null; }
+}
+
+export default async function DashboardPage({ searchParams }: { searchParams: { [k: string]: string | undefined } }) {
   const token = cookies().get('app_session')?.value || '';
   let workspace_id = '';
   let workspace_slug = '';
@@ -54,23 +61,23 @@ export default async function DashboardPage() {
     return <div className="text-red-600">No autenticado.</div>;
   }
 
-  // Rango para métricas
-  const now = new Date();
-  const past = new Date(now.getTime() - 7*24*60*60*1000).toISOString();
-  const future = new Date(now.getTime() + 14*24*60*60*1000).toISOString();
+  const from = toISOEdge(searchParams.from);
+  const to = toISOEdge(searchParams.to);
+  const q = (searchParams.q || '').trim();
 
-  // ⚠️ Solo columnas que existen en todas las instalaciones
-  const { data: rows, error } = await supabaseAdmin
+  let qb = supabaseAdmin
     .from('bookings')
     .select('id, customer_name, customer_phone, start_at, status, payment_status')
     .eq('workspace_id', workspace_id)
-    .gte('start_at', past)
-    .lte('start_at', future)
-    .order('start_at', { ascending: true })
-    .limit(200);
+    .order('start_at', { ascending: true });
+
+  if (from) qb = qb.gte('start_at', from);
+  if (to) qb = qb.lte('start_at', new Date(new Date(to).getTime() + 24*60*60*1000).toISOString());
+  if (q) qb = qb.or(`customer_name.ilike.%${q}%,customer_phone.ilike.%${q}%`);
+
+  const { data: rows, error } = await qb.limit(500);
 
   if (error) {
-    // Muestra el error en pantalla en vez de crashear
     return (
       <div className="max-w-2xl mx-auto p-4 border rounded bg-white">
         <h1 className="text-lg font-semibold mb-2">Error cargando reservas</h1>
@@ -84,15 +91,21 @@ export default async function DashboardPage() {
   const paid = list.filter(r => r.payment_status === 'PAID').length;
   const pending = list.filter(r => r.payment_status !== 'PAID').length;
   const confirmed = list.filter(r => r.status === 'CONFIRMED').length;
+  const ids = list.map(r => r.id);
 
   return (
     <div className="space-y-6">
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard — {workspace_slug}</h1>
-          <p className="text-sm text-gray-600">Vista operativa del negocio. Rol: <span className="font-medium">{role}</span></p>
+          <p className="text-sm text-gray-600">Rol: <span className="font-medium">{role}</span></p>
         </div>
       </div>
+
+      {/* Filtros */}
+      <section className="rounded-2xl border bg-white p-3 shadow-sm">
+        <DashboardFilters />
+      </section>
 
       {/* Métricas */}
       <section className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -114,20 +127,14 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* Filtro visual placeholder */}
-      <section className="rounded-2xl border bg-white p-3 shadow-sm">
-        <div className="flex flex-col md:flex-row gap-3 items-center">
-          <input placeholder="Buscar cliente o teléfono…" className="w-full md:w-80 border rounded-lg px-3 py-2 text-sm" />
-          <div className="text-xs text-gray-500">* Filtro visual</div>
-        </div>
-      </section>
-
-      {/* Tabla */}
+      {/* Tabla + acciones masivas */}
       <section className="rounded-2xl border bg-white shadow-sm overflow-hidden">
+        <SelectBulk ids={ids} />
         <div className="max-h-[70vh] overflow-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-gray-50 border-b text-xs text-gray-600">
               <tr>
+                <th className="text-left px-3 py-2">Sel.</th>
                 <th className="text-left px-3 py-2">Fecha/Hora</th>
                 <th className="text-left px-3 py-2">Cliente</th>
                 <th className="text-left px-3 py-2">Teléfono</th>
@@ -139,7 +146,7 @@ export default async function DashboardPage() {
             <tbody>
               {list.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-6 text-center text-gray-500">Sin reservas en el rango.</td>
+                  <td colSpan={7} className="px-3 py-6 text-center text-gray-500">Sin reservas en el rango.</td>
                 </tr>
               )}
               {list.map((r, idx) => {
@@ -149,6 +156,9 @@ export default async function DashboardPage() {
                   r.status === 'CANCELLED' ? 'red' : 'slate';
                 return (
                   <tr key={r.id} className={idx % 2 ? 'bg-white' : 'bg-gray-50/50'}>
+                    <td className="px-3 py-2">
+                      <input type="checkbox" onChange={() => (globalThis as any).toggleBulkRow?.(r.id)} />
+                    </td>
                     <td className="px-3 py-2">{fmt(r.start_at)}</td>
                     <td className="px-3 py-2">{r.customer_name || '-'}</td>
                     <td className="px-3 py-2">{r.customer_phone || '-'}</td>
