@@ -25,7 +25,12 @@ export async function enqueueNotification(args: {
   payload?: any;
   scheduledAt?: string; // ISO
 }) {
-  const toNorm = normalizePA(args.to).replace('whatsapp:', '');
+  const normalized = normalizePA(args.to);
+  if (!normalized || normalized.replace('whatsapp:', '').trim().length < 6) {
+    throw new Error('Invalid destination phone');
+  }
+  const toNorm = normalized.replace('whatsapp:', '');
+
   const insert = {
     workspace_id: args.workspace_id,
     to_phone: toNorm,
@@ -41,12 +46,15 @@ export async function enqueueNotification(args: {
 
 type ProcessOpts = {
   max?: number;
-  onlyImmediate?: boolean; // ignoramos; ya filtramos por scheduled_at <= now
+  onlyImmediate?: boolean; // ignorado; filtramos por scheduled_at <= now
   onlyBookingId?: string;  // filtra payload.booking_id == X
   workspaceId?: string;    // filtra por workspace_id
 };
 
-export async function processOutboxBatch(limit = 20, filters?: { onlyBookingId?: string; workspaceId?: string }) {
+export async function processOutboxBatch(
+  limit = 20,
+  filters?: { onlyBookingId?: string; workspaceId?: string }
+) {
   const nowIso = new Date().toISOString();
 
   let qb = supabaseAdmin
@@ -61,7 +69,7 @@ export async function processOutboxBatch(limit = 20, filters?: { onlyBookingId?:
     qb = qb.eq('workspace_id', filters.workspaceId);
   }
   if (filters?.onlyBookingId) {
-    // requiere que al encolar hayamos guardado { booking_id: '...' } en payload
+    // requiere payload con { booking_id: '...' }
     qb = qb.contains('payload', { booking_id: filters.onlyBookingId });
   }
 
