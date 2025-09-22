@@ -28,7 +28,12 @@ export async function POST(req: Request) {
   }
 
   const input = parsed.data;
-  const phone = normalizePA(input.customerPhone);
+
+  // Normaliza y valida teléfono
+  const phoneNorm = normalizePA(input.customerPhone);
+  if (!phoneNorm || phoneNorm.replace('whatsapp:', '').trim().length < 6) {
+    return NextResponse.json({ error: 'Teléfono inválido' }, { status: 400 });
+  }
 
   // Llamamos la RPC pública (SECURITY DEFINER) para crear la reserva PENDING
   const { data, error } = await supabaseAdmin.rpc('create_booking_public', {
@@ -36,7 +41,7 @@ export async function POST(req: Request) {
     p_service_id: input.serviceId,
     p_provider_id: input.providerId ?? null,
     p_customer_name: input.customerName,
-    p_customer_phone: phone.replace('whatsapp:', ''), // guardamos sin el prefijo
+    p_customer_phone: phoneNorm.replace('whatsapp:', ''), // guardamos sin el prefijo
     p_start_at_local: input.startAt, // server normaliza a tz Panamá
     p_notes: input.notes ?? null
   });
