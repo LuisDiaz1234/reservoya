@@ -102,9 +102,10 @@ export async function processOutboxBatch(limit = 20) {
 }
 
 /**
- * Compatibilidad con rutas que importan { processOutbox }.
- * Delegamos al batch para no cambiar nada más.
+ * Compatibilidad: acepta número (límite) o { max, onlyImmediate }.
+ * Ignoramos onlyImmediate (enviamos lo elegible a la hora actual).
  */
-export async function processOutbox(limit = 20) {
+export async function processOutbox(arg?: number | { max?: number; onlyImmediate?: boolean }) {
+  const limit = typeof arg === 'number' ? arg : (arg?.max ?? 20);
   return processOutboxBatch(limit);
 }
