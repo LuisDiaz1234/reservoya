@@ -34,7 +34,7 @@ type Body = {
   name: string;
   durationMin: number;
   priceUsd: number;
-  // lo dejamos como string genérico para permitir 'fixed' | 'percent' | 'FIXED' | 'PERCENT'
+  // aceptamos 'fixed' | 'percent' (minúsculas o mayúsculas)
   depositType?: string;
   depositValue: number;
   provider?: string | null;
@@ -101,9 +101,10 @@ export async function POST(req: Request) {
     if (provExisting && provExisting.length > 0) {
       providerId = provExisting[0].id;
     } else {
+      // ⚠️ SIN is_active: insert mínimo para coincidir con tu esquema actual
       const { data: provIns, error: eProv } = await supa
         .from('providers')
-        .insert({ workspace_id: ws.id, name: nameClean, is_active: true })
+        .insert({ workspace_id: ws.id, name: nameClean })
         .select('id')
         .single();
 
@@ -117,13 +118,10 @@ export async function POST(req: Request) {
     }
   }
 
-  // 3) Insert del servicio
+  // 3) Insert del servicio (⚠️ SIN is_active)
   const price_cents = Math.round(Number(priceUsd || 0) * 100);
-
-  // ⚠️ FIX: normalizamos a minúsculas y comparamos solo con 'percent'
   const depType =
     String(depositType ?? 'fixed').toLowerCase() === 'percent' ? 'PERCENT' : 'FIXED';
-
   const depValue = Number(depositValue || 0);
   const duration_min = Number(durationMin || 0);
 
@@ -136,7 +134,7 @@ export async function POST(req: Request) {
       price_cents,
       deposit_type: depType,   // 'FIXED' | 'PERCENT'
       deposit_value: depValue, // USD o %
-      is_active: true,
+      // is_active eliminado para no depender del esquema
     })
     .select('id')
     .single();
