@@ -32,11 +32,10 @@ export async function GET(req: Request) {
 type Body = {
   workspaceSlug: string;
   name: string;
-  durationMin: number;
+  durationMin: number;  // llega desde el form en minutos
   priceUsd: number;
-  // aceptamos 'fixed' | 'percent' (minúsculas o mayúsculas)
-  depositType?: string;
-  depositValue: number;
+  depositType?: string; // 'fixed' | 'percent' (cualquier casing)
+  depositValue: number; // USD si fixed, % si percent
   provider?: string | null;
 };
 
@@ -79,7 +78,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'workspace not found' }, { status: 404 });
   }
 
-  // 2) (opcional) provider por nombre
+  // 2) (opcional) provider por nombre (sin is_active)
   let providerId: string | null = null;
   if (provider && provider.trim()) {
     const nameClean = provider.trim();
@@ -101,7 +100,6 @@ export async function POST(req: Request) {
     if (provExisting && provExisting.length > 0) {
       providerId = provExisting[0].id;
     } else {
-      // ⚠️ SIN is_active: insert mínimo para coincidir con tu esquema actual
       const { data: provIns, error: eProv } = await supa
         .from('providers')
         .insert({ workspace_id: ws.id, name: nameClean })
@@ -118,23 +116,29 @@ export async function POST(req: Request) {
     }
   }
 
-  // 3) Insert del servicio (⚠️ SIN is_active)
+  // 3) Insert del servicio (MAP CORRECTO DE CAMPOS)
   const price_cents = Math.round(Number(priceUsd || 0) * 100);
+
   const depType =
     String(depositType ?? 'fixed').toLowerCase() === 'percent' ? 'PERCENT' : 'FIXED';
   const depValue = Number(depositValue || 0);
-  const duration_min = Number(durationMin || 0);
+
+  // Tu esquema usa duration_minutes (NOT NULL):
+  let duration_minutes = Math.max(1, Math.floor(Number(durationMin || 0)));
+  if (!Number.isFinite(duration_minutes) || duration_minutes < 1) {
+    duration_minutes = 15; // fallback defensivo
+  }
 
   const { data: svc, error: eSvc } = await supa
     .from('services')
     .insert({
       workspace_id: ws.id,
       name,
-      duration_min,
+      duration_minutes,         // ✅ nombre correcto en tu tabla
       price_cents,
-      deposit_type: depType,   // 'FIXED' | 'PERCENT'
-      deposit_value: depValue, // USD o %
-      // is_active eliminado para no depender del esquema
+      deposit_type: depType,    // 'FIXED' | 'PERCENT'
+      deposit_value: depValue,  // USD o %
+      // is_active no se envía (tu schema no lo tiene)
     })
     .select('id')
     .single();
@@ -155,7 +159,7 @@ export async function POST(req: Request) {
         service_id: svc.id,
       });
     } catch {
-      // si la tabla no existe, lo ignoramos
+      // si la tabla puente no existe, lo ignoramos sin romper
     }
   }
 
