@@ -2,124 +2,68 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
-function reqEnv(name: string): string {
+function need(name: string) {
   const v = process.env[name];
-  if (!v) throw new Error(`Falta variable de entorno ${name}`);
+  if (!v) throw new Error(`Missing env ${name}`);
   return v;
 }
 
-type Body = {
-  key?: string;
-  workspaceSlug: string;
-  name: string;
-  durationMin: number;
-  priceUsd: number;
-  depositType: 'FIXED' | 'PERCENT';
-  depositValue: number; // FIXED: USD; PERCENT: 0-100
-  providerName?: string | null;
-};
-
-export async function GET(req: Request) {
-  const key = new URL(req.url).searchParams.get('key') ?? '';
-  if (key !== process.env.CRON_SECRET) {
-    return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
-  }
-  return NextResponse.json({ ok: true, method: 'GET' });
-}
-
 export async function POST(req: Request) {
-  let body: Body | null = null;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, error: 'JSON inválido' }, { status: 400 });
+  let body: any;
+  try { body = await req.json(); } catch { 
+    return NextResponse.json({ ok:false, error:'invalid json' }, { status:400 });
   }
 
-  const key =
-    body?.key ??
-    new URL(req.url).searchParams.get('key') ??
-    '';
-
+  const key = (body?.key ?? '') as string;
   if (key !== process.env.CRON_SECRET) {
-    return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
-  }
-
-  if (!body) {
-    return NextResponse.json({ ok: false, error: 'Sin body' }, { status: 400 });
+    return NextResponse.json({ ok:false, error:'unauthorized' }, { status:401 });
   }
 
   const supabase = createClient(
-    reqEnv('NEXT_PUBLIC_SUPABASE_URL'),
-    reqEnv('SUPABASE_SERVICE_ROLE_KEY')
+    need('NEXT_PUBLIC_SUPABASE_URL'),
+    need('SUPABASE_SERVICE_ROLE_KEY')
   );
 
-  // 1) Buscar workspace por slug
-  const { data: ws, error: werr } = await supabase
-    .from('workspaces')
-    .select('id')
-    .eq('slug', body.workspaceSlug)
-    .single();
+  const { workspaceSlug, name, durationMin, priceUsd, depositType, depositValue, providerName } = body;
 
-  if (werr || !ws) {
-    return NextResponse.json({ ok: false, error: 'workspace no encontrado' }, { status: 404 });
-  }
+  const { data: ws } = await supabase
+    .from('workspaces').select('id').eq('slug', workspaceSlug).single();
 
-  // 2) Garantizar provider si viene por nombre
-  let providerId: string | null = null;
-  if (body.providerName && body.providerName.trim()) {
-    const { data: prov } = await supabase
-      .from('providers')
-      .select('id')
-      .eq('workspace_id', ws.id)
-      .eq('name', body.providerName.trim())
-      .maybeSingle();
+  if (!ws?.id) return NextResponse.json({ ok:false, error:'workspace not found' }, { status:404 });
 
-    if (prov?.id) {
-      providerId = prov.id;
-    } else {
-      const ins = await supabase
-        .from('providers')
-        .insert({ workspace_id: ws.id, name: body.providerName.trim() })
-        .select('id')
-        .single();
-      if (ins.error) {
-        return NextResponse.json({ ok: false, error: ins.error.message }, { status: 400 });
-      }
-      providerId = ins.data.id;
+  // provider opcional
+  let provider_id: string | null = null;
+  if (providerName?.trim()) {
+    const { data: found } = await supabase
+      .from('providers').select('id').eq('workspace_id', ws.id).eq('name', providerName.trim()).maybeSingle();
+    if (found?.id) provider_id = found.id;
+    else {
+      const ins = await supabase.from('providers').insert({ workspace_id: ws.id, name: providerName.trim() }).select('id').single();
+      if (ins.error) return NextResponse.json({ ok:false, error:ins.error.message }, { status:400 });
+      provider_id = ins.data.id;
     }
   }
 
-  // 3) Calcular montos
-  const price_cents = Math.round(Number(body.priceUsd) * 100);
-  const deposit_value =
-    body.depositType === 'FIXED'
-      ? Math.round(Number(body.depositValue) * 100) // USD → cents
-      : Math.round(Number(body.depositValue)); // porcentaje 0-100
+  const price_cents = Math.round(Number(priceUsd) * 100);
+  const dep_val = depositType === 'FIXED'
+    ? Math.round(Number(depositValue) * 100)
+    : Math.round(Number(depositValue)); // porcentaje 0-100
 
-  // 4) Insertar servicio
-  const { data: svc, error: serr } = await supabase
-    .from('services')
-    .insert({
-      workspace_id: ws.id,
-      provider_id: providerId,
-      name: body.name,
-      duration_min: Number(body.durationMin),
-      price_cents,
-      deposit_type: body.depositType,
-      deposit_value,
-      is_active: true,
-    })
-    .select('id, name');
+  const ins = await supabase.from('services').insert({
+    workspace_id: ws.id,
+    provider_id,
+    name,
+    duration_min: Number(durationMin),
+    price_cents,
+    deposit_type: depositType,
+    deposit_value: dep_val,
+    is_active: true
+  }).select('id,name').single();
 
-  if (serr) {
-    return NextResponse.json({ ok: false, error: serr.message }, { status: 400 });
-  }
+  if (ins.error) return NextResponse.json({ ok:false, error:ins.error.message }, { status:400 });
 
-  return NextResponse.json({
-    ok: true,
-    created: svc?.[0] ?? null,
-  });
+  return NextResponse.json({ ok:true, created: ins.data });
 }
