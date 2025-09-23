@@ -1,208 +1,230 @@
-// apps/web/app/tools/create-service/page.tsx
 'use client';
 
-import { useState } from 'react';
+import * as React from 'react';
 
-type Result = {
+type ProbeResult = {
   status: number;
-  json?: any;
+  json?: unknown;
   raw?: string;
 };
 
+function Label({ children }: { children: React.ReactNode }) {
+  return <label className="block text-sm font-medium mb-1">{children}</label>;
+}
+
+// Lee la respuesta SOLO una vez (si no es JSON, cae a texto)
+async function readOnce(res: Response): Promise<ProbeResult> {
+  try {
+    const json = await res.json();
+    return { status: res.status, json, raw: '' };
+  } catch {
+    const raw = await res.text();
+    return { status: res.status, raw };
+  }
+}
+
 export default function CreateServiceTool() {
-  const [adminKey, setAdminKey] = useState('');
-  const [workspaceSlug, setWorkspaceSlug] = useState('demo-salon');
-  const [name, setName] = useState('');
-  const [durationMin, setDurationMin] = useState(30);
-  const [priceUsd, setPriceUsd] = useState(5);
-  const [depositType, setDepositType] = useState<'FIXED' | 'PERCENT'>('FIXED');
-  const [depositValue, setDepositValue] = useState(2);
-  const [providerName, setProviderName] = useState('');
-  const [result, setResult] = useState<Result | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [key, setKey] = React.useState('');
+  const [workspaceSlug, setWorkspaceSlug] = React.useState('demo-salon');
+  const [name, setName] = React.useState('');
+  const [durationMin, setDurationMin] = React.useState<number | ''>(30);
+  const [priceUsd, setPriceUsd] = React.useState<number | ''>(5);
+  const [depositType, setDepositType] = React.useState<'fixed' | 'percent'>('fixed');
+  const [depositValue, setDepositValue] = React.useState<number | ''>(2);
+  const [provider, setProvider] = React.useState('');
 
-  const basePath = '/api/tools/create-service';
+  const [loading, setLoading] = React.useState(false);
+  const [resp, setResp] = React.useState<ProbeResult | null>(null);
 
-  async function testKey() {
-    setLoading(true);
-    try {
-      const r = await fetch(`${basePath}?key=${encodeURIComponent(adminKey)}`);
-      const j = await r.json().catch(() => null);
-      setResult({ status: r.status, json: j ?? null, raw: j ? '' : await r.text() });
-    } catch (e: any) {
-      setResult({ status: 0, raw: String(e) });
-    } finally {
-      setLoading(false);
+  const onProbe = async () => {
+    if (!key) {
+      setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
+      return;
     }
-  }
-
-  async function submit() {
     setLoading(true);
-    setResult(null);
     try {
-      const r = await fetch(basePath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          key: adminKey,
-          workspaceSlug,
-          name,
-          durationMin: Number(durationMin),
-          priceUsd: Number(priceUsd),
-          depositType,
-          depositValue: Number(depositValue),
-          providerName: providerName.trim() || null,
-        }),
+      const res = await fetch(`/api/tools/create-service?key=${encodeURIComponent(key)}`, {
+        method: 'GET',
+        cache: 'no-store',
       });
-      const txt = await r.text();
-      let j: any = null;
-      try { j = JSON.parse(txt); } catch { /* no-op */ }
-      setResult({ status: r.status, json: j ?? undefined, raw: j ? '' : txt });
+      setResp(await readOnce(res));
     } catch (e: any) {
-      setResult({ status: 0, raw: String(e) });
+      setResp({ status: 0, raw: String(e?.message || e) });
     } finally {
       setLoading(false);
     }
-  }
+  };
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!key) {
+      setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
+      return;
+    }
+    if (!workspaceSlug || !name) {
+      setResp({ status: 0, raw: 'Faltan campos: workspace y/o nombre del servicio' });
+      return;
+    }
+    setLoading(true);
+    try {
+      const body = {
+        workspaceSlug,
+        name,
+        durationMin: Number(durationMin || 0),
+        priceUsd: Number(priceUsd || 0),
+        depositType, // 'fixed' | 'percent'
+        depositValue: Number(depositValue || 0),
+        provider: provider.trim() || null, // opcional
+      };
+
+      const res = await fetch(`/api/tools/create-service?key=${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      setResp(await readOnce(res));
+    } catch (e: any) {
+      setResp({ status: 0, raw: String(e?.message || e) });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="max-w-2xl mx-auto p-6 space-y-6">
+    <div className="max-w-3xl mx-auto p-6 space-y-6">
       <h1 className="text-2xl font-semibold">Crear servicio (herramienta rápida)</h1>
 
       <div className="rounded-lg border p-4 bg-white">
         <p className="font-medium mb-2">PRUEBA RÁPIDA</p>
-        <ol className="list-decimal list-inside text-sm space-y-1">
+        <ol className="list-decimal ml-5 space-y-1 text-sm">
           <li>
             En otra pestaña, abre:{' '}
-            <code className="px-2 py-1 bg-gray-100 rounded">
+            <code className="bg-gray-100 px-1 py-0.5 rounded">
               /api/tools/create-service?key=TU_CRON_SECRET
             </code>
           </li>
-          <li>Si ves {'{ ok: true, method: \'GET\' }'}, la key es correcta.</li>
+          <li>
+            Si ves <code>{`{ ok: true, method: 'GET' }`}</code>, la key es correcta.
+          </li>
           <li>Luego envía el formulario de abajo.</li>
         </ol>
       </div>
 
-      <div className="grid gap-4">
-        <label className="grid gap-1">
-          <span className="text-sm">Admin key (CRON_SECRET)</span>
+      <form onSubmit={onSubmit} className="space-y-4">
+        <div>
+          <Label>Admin key (CRON_SECRET)</Label>
           <input
-            className="border rounded px-3 py-2"
-            value={adminKey}
-            onChange={(e) => setAdminKey(e.target.value)}
-            placeholder="Tu CRON_SECRET (ej. luisd)"
+            className="w-full rounded border px-3 py-2"
+            placeholder="tu CRON_SECRET (ej. luisd)"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
           />
-        </label>
+        </div>
 
-        <label className="grid gap-1">
-          <span className="text-sm">Workspace slug</span>
+        <div>
+          <Label>Workspace slug</Label>
           <input
-            className="border rounded px-3 py-2"
+            className="w-full rounded border px-3 py-2"
+            placeholder="demo-salon"
             value={workspaceSlug}
             onChange={(e) => setWorkspaceSlug(e.target.value)}
-            placeholder="demo-salon"
           />
-        </label>
+        </div>
 
-        <label className="grid gap-1">
-          <span className="text-sm">Nombre del servicio</span>
+        <div>
+          <Label>Nombre del servicio</Label>
           <input
-            className="border rounded px-3 py-2"
+            className="w-full rounded border px-3 py-2"
+            placeholder="Manicure / Barbería / ... "
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Manicure, Barbería, etc."
           />
-        </label>
+        </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1">
-            <span className="text-sm">Duración (min)</span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <Label>Duración (min)</Label>
             <input
               type="number"
-              className="border rounded px-3 py-2"
+              min={1}
+              className="w-full rounded border px-3 py-2"
               value={durationMin}
-              onChange={(e) => setDurationMin(Number(e.target.value))}
-              min={5}
-              step={5}
+              onChange={(e) => setDurationMin(e.target.value === '' ? '' : Number(e.target.value))}
             />
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm">Precio (USD)</span>
+          </div>
+          <div>
+            <Label>Precio (USD)</Label>
             <input
               type="number"
-              className="border rounded px-3 py-2"
+              min={0}
+              step="0.01"
+              className="w-full rounded border px-3 py-2"
               value={priceUsd}
-              onChange={(e) => setPriceUsd(Number(e.target.value))}
-              min={0}
-              step={0.5}
+              onChange={(e) => setPriceUsd(e.target.value === '' ? '' : Number(e.target.value))}
             />
-          </label>
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1">
-            <span className="text-sm">Tipo de depósito</span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <Label>Tipo de depósito</Label>
             <select
-              className="border rounded px-3 py-2"
+              className="w-full rounded border px-3 py-2"
               value={depositType}
-              onChange={(e) => setDepositType(e.target.value as 'FIXED' | 'PERCENT')}
+              onChange={(e) => setDepositType(e.target.value as 'fixed' | 'percent')}
             >
-              <option value="FIXED">Fijo (USD)</option>
-              <option value="PERCENT">Porcentaje (%)</option>
+              <option value="fixed">Fijo (USD)</option>
+              <option value="percent">Porcentaje (%)</option>
             </select>
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm">Valor del depósito</span>
+          </div>
+          <div>
+            <Label>Valor del depósito</Label>
             <input
               type="number"
-              className="border rounded px-3 py-2"
-              value={depositValue}
-              onChange={(e) => setDepositValue(Number(e.target.value))}
               min={0}
-              step={depositType === 'FIXED' ? 0.5 : 1}
+              step="0.01"
+              className="w-full rounded border px-3 py-2"
+              value={depositValue}
+              onChange={(e) => setDepositValue(e.target.value === '' ? '' : Number(e.target.value))}
             />
-          </label>
+          </div>
         </div>
 
-        <label className="grid gap-1">
-          <span className="text-sm">
-            Profesional (opcional) — si no existe, lo crea
-          </span>
+        <div>
+          <Label>Profesional (opcional) — si no existe, lo crea</Label>
           <input
-            className="border rounded px-3 py-2"
-            value={providerName}
-            onChange={(e) => setProviderName(e.target.value)}
-            placeholder="General / Luis / Silla 1"
+            className="w-full rounded border px-3 py-2"
+            placeholder="Silla 1 / Luis / ... (opcional)"
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
           />
-        </label>
+        </div>
 
         <div className="flex gap-3">
           <button
             type="button"
-            onClick={testKey}
-            className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300"
-            disabled={loading}
+            onClick={onProbe}
+            disabled={loading || !key}
+            className="rounded bg-gray-100 hover:bg-gray-200 px-4 py-2 text-sm"
           >
             Probar key (GET)
           </button>
 
           <button
-            type="button"
-            onClick={submit}
-            className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+            type="submit"
             disabled={loading}
+            className="rounded bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm"
           >
-            {loading ? 'Enviando…' : 'Crear servicio'}
+            {loading ? 'Creando...' : 'Crear servicio'}
           </button>
         </div>
-      </div>
+      </form>
 
-      <div className="mt-4">
-        <p className="text-sm font-medium mb-1">Respuesta</p>
-        <pre className="bg-gray-50 border rounded p-3 overflow-auto text-sm">
-{JSON.stringify(result ?? {}, null, 2)}
+      <div className="rounded-lg border p-4 bg-white">
+        <p className="font-medium mb-2">Respuesta</p>
+        <pre className="text-xs whitespace-pre-wrap">
+          {resp ? JSON.stringify(resp, null, 2) : '// aquí verás la respuesta'}
         </pre>
       </div>
     </div>
