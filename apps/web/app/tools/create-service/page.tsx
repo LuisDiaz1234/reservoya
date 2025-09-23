@@ -1,5 +1,6 @@
 'use client';
 
+// v3 – lector robusto de Response: nunca lee el body dos veces.
 import * as React from 'react';
 
 type ProbeResult = {
@@ -12,18 +13,29 @@ function Label({ children }: { children: React.ReactNode }) {
   return <label className="block text-sm font-medium mb-1">{children}</label>;
 }
 
-// Lee la respuesta SOLO una vez (si no es JSON, cae a texto)
-async function readOnce(res: Response): Promise<ProbeResult> {
+/** Lee la Response una sola vez, según content-type. */
+async function readSmart(res: Response): Promise<ProbeResult> {
+  const ct = res.headers.get('content-type') || '';
   try {
-    const json = await res.json();
-    return { status: res.status, json, raw: '' };
-  } catch {
+    if (ct.includes('application/json')) {
+      const json = await res.json();
+      return { status: res.status, json, raw: '' };
+    }
+    // Si no declara JSON, leemos texto y tratamos de parsear por si el server sí mandó JSON
     const raw = await res.text();
-    return { status: res.status, raw };
+    try {
+      const json = JSON.parse(raw);
+      return { status: res.status, json, raw: '' };
+    } catch {
+      return { status: res.status, raw };
+    }
+  } catch (e: any) {
+    return { status: 0, raw: String(e?.message || e) };
   }
 }
 
 export default function CreateServiceTool() {
+  // estado
   const [key, setKey] = React.useState('');
   const [workspaceSlug, setWorkspaceSlug] = React.useState('demo-salon');
   const [name, setName] = React.useState('');
@@ -36,18 +48,16 @@ export default function CreateServiceTool() {
   const [loading, setLoading] = React.useState(false);
   const [resp, setResp] = React.useState<ProbeResult | null>(null);
 
+  // Prueba de key: SOLO GET, y solo leemos 1 vez
   const onProbe = async () => {
-    if (!key) {
-      setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
-      return;
-    }
+    if (!key) return setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
     setLoading(true);
     try {
       const res = await fetch(`/api/tools/create-service?key=${encodeURIComponent(key)}`, {
         method: 'GET',
         cache: 'no-store',
       });
-      setResp(await readOnce(res));
+      setResp(await readSmart(res));
     } catch (e: any) {
       setResp({ status: 0, raw: String(e?.message || e) });
     } finally {
@@ -55,16 +65,13 @@ export default function CreateServiceTool() {
     }
   };
 
+  // Envío del formulario: POST con JSON, lectura única
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!key) {
-      setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
-      return;
-    }
-    if (!workspaceSlug || !name) {
-      setResp({ status: 0, raw: 'Faltan campos: workspace y/o nombre del servicio' });
-      return;
-    }
+    if (!key) return setResp({ status: 0, raw: 'Falta Admin key (CRON_SECRET)' });
+    if (!workspaceSlug || !name)
+      return setResp({ status: 0, raw: 'Faltan campos: workspace y/o nombre del servicio' });
+
     setLoading(true);
     try {
       const body = {
@@ -83,7 +90,7 @@ export default function CreateServiceTool() {
         body: JSON.stringify(body),
       });
 
-      setResp(await readOnce(res));
+      setResp(await readSmart(res));
     } catch (e: any) {
       setResp({ status: 0, raw: String(e?.message || e) });
     } finally {
@@ -93,7 +100,7 @@ export default function CreateServiceTool() {
 
   return (
     <div className="max-w-3xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-semibold">Crear servicio (herramienta rápida)</h1>
+      <h1 className="text-2xl font-semibold">Crear servicio (herramienta rápida) · v3</h1>
 
       <div className="rounded-lg border p-4 bg-white">
         <p className="font-medium mb-2">PRUEBA RÁPIDA</p>
@@ -105,7 +112,7 @@ export default function CreateServiceTool() {
             </code>
           </li>
           <li>
-            Si ves <code>{`{ ok: true, method: 'GET' }`}</code>, la key es correcta.
+            Debe mostrar <code>{`{ ok: true, method: 'GET' }`}</code>.
           </li>
           <li>Luego envía el formulario de abajo.</li>
         </ol>
@@ -136,7 +143,7 @@ export default function CreateServiceTool() {
           <Label>Nombre del servicio</Label>
           <input
             className="w-full rounded border px-3 py-2"
-            placeholder="Manicure / Barbería / ... "
+            placeholder="Manicure / Barbería / ..."
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -195,7 +202,7 @@ export default function CreateServiceTool() {
           <Label>Profesional (opcional) — si no existe, lo crea</Label>
           <input
             className="w-full rounded border px-3 py-2"
-            placeholder="Silla 1 / Luis / ... (opcional)"
+            placeholder="Silla 1 / Luis / ..."
             value={provider}
             onChange={(e) => setProvider(e.target.value)}
           />
