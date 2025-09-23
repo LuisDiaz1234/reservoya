@@ -1,9 +1,9 @@
 // apps/web/lib/yappy.ts
-// Cliente mínimo para Botón de Pago Yappy V2
+// Cliente mínimo para Botón de Pago Yappy V2, con diagnóstico mejorado.
 
 function getApiBase() {
   const env = (process.env.YAPPY_ENV || 'prod').toLowerCase();
-  // prod: apipagosbg.bgeneral.cloud | uat: api-comecom-uat.yappycloud.com
+  // prod: apipagosbg.bgeneral.cloud  |  uat: api-comecom-uat.yappycloud.com
   return env === 'uat'
     ? 'https://api-comecom-uat.yappycloud.com'
     : 'https://apipagosbg.bgeneral.cloud';
@@ -23,11 +23,16 @@ export function normalizePaPhone(input: string) {
   return digits.startsWith('507') ? digits.slice(3) : digits;
 }
 
+async function parseMaybeJson(res: Response) {
+  const text = await res.text();
+  try { return { json: JSON.parse(text), text }; } catch { return { json: null, text }; }
+}
+
 // Paso 1: validar comercio → obtener token
 export async function yappyValidateMerchant(origin: string) {
   const apiBase = getApiBase();
   const merchantId = process.env.YAPPY_MERCHANT_ID!;
-  if (!merchantId) throw new Error('Falta YAPPY_MERCHANT_ID');
+  if (!merchantId) throw { step: 'validate', message: 'Falta YAPPY_MERCHANT_ID' };
 
   // Debe coincidir EXACTO con el configurado en Yappy Comercial
   const urlDomain = process.env.YAPPY_DOMAIN_OVERRIDE || origin;
@@ -38,13 +43,13 @@ export async function yappyValidateMerchant(origin: string) {
     body: JSON.stringify({ merchantId, urlDomain }),
   });
 
-  const json = await res.json().catch(() => null);
+  const { json, text } = await parseMaybeJson(res);
   if (!res.ok) {
-    throw new Error(`validate ${res.status}: ${JSON.stringify(json)}`);
+    throw { step: 'validate', status: res.status, body: json ?? text };
   }
   const token = json?.body?.token;
   const epochTime = json?.body?.epochTime;
-  if (!token) throw new Error(`validate sin token: ${JSON.stringify(json)}`);
+  if (!token) throw { step: 'validate', status: res.status, body: json ?? text };
   return { token, epochTime, urlDomain };
 }
 
@@ -53,7 +58,7 @@ export async function yappyCreateOrder(args: {
   token: string;
   orderId: string;           // máx 15 chars
   domain: string;
-  aliasYappy: string;        // teléfono panameño SIN +507
+  aliasYappy: string;        // teléfono panameño SIN +507 (8 dígitos)
   total: string;             // "0.01" etc.
   ipnUrl: string;            // nuestro webhook GET
   subtotal?: string;
@@ -84,15 +89,15 @@ export async function yappyCreateOrder(args: {
     body: JSON.stringify(body),
   });
 
-  const json = await res.json().catch(() => null);
+  const { json, text } = await parseMaybeJson(res);
   if (!res.ok) {
-    throw new Error(`create ${res.status}: ${JSON.stringify(json)}`);
+    throw { step: 'create', status: res.status, body: json ?? text };
   }
   const transactionId = json?.body?.transactionId;
   const token = json?.body?.token;
   const documentName = json?.body?.documentName;
   if (!transactionId || !token || !documentName) {
-    throw new Error(`create incompleto: ${JSON.stringify(json)}`);
+    throw { step: 'create', status: res.status, body: json ?? text };
   }
   return { transactionId, token, documentName };
 }
