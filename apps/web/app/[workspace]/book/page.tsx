@@ -58,6 +58,14 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
     return selectedService.deposit_amount_cents || 0;
   }, [selectedService]);
 
+  function normalizePA(input: string) {
+    let s = (input || "").trim().replace(/\s+/g, "");
+    if (!s) return s;
+    // si no trae +, asumimos Panamá
+    if (!s.startsWith("+")) s = "+507" + s.replace(/^0+/, "");
+    return s;
+  }
+
   async function loadAvailability() {
     setAvailability([]);
     setTimeISO("");
@@ -88,20 +96,26 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          workspaceSlug: slug,
+          // 👇 CAMBIO CLAVE: el API exige 'workspace'
+          workspace: slug,
           serviceId,
           providerId,
           startAt: timeISO,
           customerName: name,
-          customerPhone: phone,
-          customerEmail: email || null
-        })
+          // 👇 Nombres que espera el API
+          phone: normalizePA(phone),
+          email: email || null,
+        }),
       });
+
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || "Error al crear la reserva");
+
       const bookingId = j?.result?.booking_id;
       const deposit = j?.result?.deposit_cents ?? 0;
+
       setOkMsg(`Reserva creada. Depósito estimado: ${formatUSD(deposit)}. Redirigiendo...`);
+
       // Redirigir a confirmación
       const u = new URL(window.location.href);
       u.pathname = `/${slug}/book/confirm`;
