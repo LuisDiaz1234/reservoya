@@ -11,7 +11,6 @@ function admin() {
   return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 }
 
-// Normaliza teléfono de Panamá: agrega +507 si viene sin prefijo
 function normalizePA(input: string | null | undefined) {
   let s = (input ?? '').trim().replace(/\s+/g, '');
   if (!s) return s;
@@ -19,7 +18,6 @@ function normalizePA(input: string | null | undefined) {
   return s;
 }
 
-// Construye respuesta de validación tipo { error:'Validación', details:{ fieldErrors:{...} } }
 function validationError(fieldErrors: Record<string, string[]>) {
   return NextResponse.json(
     { error: 'Validación', details: { formErrors: [], fieldErrors } },
@@ -27,38 +25,70 @@ function validationError(fieldErrors: Record<string, string[]>) {
   );
 }
 
-export async function POST(req: Request) {
-  // 1) Leer JSON una sola vez
-  let raw: any;
+// --- parser robusto del body (json, form, o query) ---
+async function parseBody(req: Request): Promise<Record<string, any>> {
+  const ct = (req.headers.get('content-type') || '').toLowerCase();
+
+  // 1) JSON explícito
+  if (ct.includes('application/json')) {
+    // usa .text() para evitar “stream already read”
+    const txt = await req.text();
+    if (!txt) return {};
+    try { return JSON.parse(txt); } catch { /* sigue abajo */ }
+  }
+
+  // 2) x-www-form-urlencoded
+  if (ct.includes('application/x-www-form-urlencoded')) {
+    const txt = await req.text();
+    const params = new URLSearchParams(txt);
+    return Object.fromEntries(params.entries());
+  }
+
+  // 3) multipart/form-data
+  if (ct.includes('multipart/form-data')) {
+    const form = await req.formData();
+    return Object.fromEntries(form.entries());
+  }
+
+  // 4) Fallback: intenta parsear texto como JSON
   try {
-    raw = await req.json();
+    const txt = await req.text();
+    if (txt) return JSON.parse(txt);
+  } catch { /* sigue abajo */ }
+
+  // 5) Último recurso: query params
+  const url = new URL(req.url);
+  return Object.fromEntries(url.searchParams.entries());
+}
+
+export async function POST(req: Request) {
+  let raw: any = null;
+  try {
+    raw = await parseBody(req);
   } catch {
     return NextResponse.json({ error: 'JSON inválido' }, { status: 400 });
   }
 
-  // 2) Flexibilidad en nombres de campos
+  // Flexibilidad en nombres de campos
   const workspace = raw.workspace ?? raw.workspaceSlug ?? '';
   const serviceId = raw.serviceId ?? raw.service_id ?? '';
-  const providerId = raw.providerId ?? raw.provider_id ?? null; // puede ser null
+  const providerId = raw.providerId ?? raw.provider_id ?? null;
   const startAt = raw.startAt ?? raw.start_at ?? '';
   const customerName = raw.customerName ?? raw.customer_name ?? '';
   const phone = normalizePA(raw.phone ?? raw.customerPhone ?? raw.customer_phone);
   const email = raw.email ?? raw.customerEmail ?? null;
   const notes = raw.notes ?? null;
 
-  // 3) Validaciones mínimas
+  // Validación mínima
   const errs: Record<string, string[]> = {};
   if (!workspace) errs.workspace = ['Required'];
   if (!serviceId) errs.serviceId = ['Required'];
   if (!startAt) errs.startAt = ['Required'];
   if (!customerName) errs.customerName = ['Required'];
   if (!phone) errs.phone = ['Required'];
-
   if (Object.keys(errs).length > 0) return validationError(errs);
 
-  // 4) Llamar a RPC (SECURITY DEFINER) que creamos en Fase 1
-  //    Firma esperada (variantes comunes):
-  //    - create_booking_public(p_workspace_slug, p_service_id, p_provider_id, p_customer_name, p_customer_phone, p_start_at_local, p_notes)
+  // Llamada a la RPC SECURITY DEFINER
   const supa = admin();
   const argsA = {
     p_workspace_slug: workspace,
@@ -70,11 +100,10 @@ export async function POST(req: Request) {
     p_notes: notes,
   };
 
-  // Intento 1: con p_workspace_slug (la más común)
   let rpc = await supa.rpc('create_booking_public', argsA);
 
-  // Si la función no aceptara esos nombres exactos, prueba una variante común p_workspace
-  if (rpc.error && /function .* does not exist|No function matches/i.test(rpc.error.message)) {
+  // Compatibilidad con otra firma común (p_workspace)
+  if (rpc.error && /does not exist|No function matches/i.test(rpc.error.message)) {
     const argsB = {
       p_workspace: workspace,
       p_service_id: serviceId,
@@ -88,13 +117,20 @@ export async function POST(req: Request) {
   }
 
   if (rpc.error) {
-    // Devuelve error de negocio de forma clara
     return NextResponse.json(
       { error: 'No se pudo crear la reserva', details: rpc.error.message },
       { status: 500 }
     );
   }
 
-  // La función suele retornar booking_id y deposit_cents; si no, igual entregamos lo que venga
   return NextResponse.json({ ok: true, result: rpc.data ?? null });
+}
+
+// (Opcional) ayuda para probar rápido vía navegador con query params
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  if (url.searchParams.get('ping') === '1') {
+    return NextResponse.json({ ok: true, hint: 'POST /api/public/bookings con JSON o form data' });
+  }
+  return NextResponse.json({ error: 'Method not allowed' }, { status: 405 });
 }
