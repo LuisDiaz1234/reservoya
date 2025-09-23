@@ -24,7 +24,7 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
   const [availability, setAvailability] = useState<string[]>([]);
   const [timeISO, setTimeISO] = useState<string>("");
 
-  // Datos de cliente
+  // Datos del cliente
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -37,7 +37,7 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
     setLoadingMeta(true);
     fetch(`/api/public/workspaces/${slug}/meta`)
       .then(r => r.json())
-      .then((j) => {
+      .then(j => {
         if (j.error) throw new Error(j.error);
         setMeta(j);
       })
@@ -53,7 +53,10 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
   const depositPreview = useMemo(() => {
     if (!selectedService) return 0;
     if (selectedService.deposit_type === "PERCENT") {
-      return Math.max(1, Math.round((selectedService.price_cents * (selectedService.deposit_percent || 0)) / 100));
+      return Math.max(
+        1,
+        Math.round((selectedService.price_cents * (selectedService.deposit_percent || 0)) / 100)
+      );
     }
     return selectedService.deposit_amount_cents || 0;
   }, [selectedService]);
@@ -61,7 +64,6 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
   function normalizePA(input: string) {
     let s = (input || "").trim().replace(/\s+/g, "");
     if (!s) return s;
-    // si no trae +, asumimos Panamá
     if (!s.startsWith("+")) s = "+507" + s.replace(/^0+/, "");
     return s;
   }
@@ -78,45 +80,50 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
     const j = await fetch(url).then(r => r.json());
     if (j.error) { setError(j.error); return; }
     setAvailability(j.availability || []);
-    if ((j.availability || []).length === 0) {
-      setError("No hay horarios disponibles para ese día.");
-    }
+    if ((j.availability || []).length === 0) setError("No hay horarios disponibles para ese día.");
   }
 
   async function submitBooking() {
     setError("");
     setOkMsg("");
+
     if (!serviceId || !providerId || !dateStr || !timeISO || !name || !phone) {
       setError("Completa todos los campos obligatorios (*)");
       return;
     }
+
     setSubmitting(true);
     try {
+      // 👉 El endpoint espera FormData, no JSON
+      const body = new URLSearchParams({
+        workspace: slug,
+        serviceId,
+        providerId,
+        startAt: timeISO,
+        customerName: name,
+        phone: normalizePA(phone),
+        email: email || "",
+      });
+
       const res = await fetch("/api/public/bookings", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          // 👇 CAMBIO CLAVE: el API exige 'workspace'
-          workspace: slug,
-          serviceId,
-          providerId,
-          startAt: timeISO,
-          customerName: name,
-          // 👇 Nombres que espera el API
-          phone: normalizePA(phone),
-          email: email || null,
-        }),
+        headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body,
       });
 
       const j = await res.json();
-      if (!res.ok) throw new Error(j.error || "Error al crear la reserva");
 
-      const bookingId = j?.result?.booking_id;
-      const deposit = j?.result?.deposit_cents ?? 0;
+      if (!res.ok) {
+        // Muestra el detalle de validación si viene
+        const v = j?.details ? ` — ${JSON.stringify(j.details)}` : "";
+        throw new Error(j.error || ("Error al crear la reserva" + v));
+      }
+
+      const bookingId = j?.result?.booking_id as string;
+      const deposit = (j?.result?.deposit_cents ?? 0) as number;
 
       setOkMsg(`Reserva creada. Depósito estimado: ${formatUSD(deposit)}. Redirigiendo...`);
 
-      // Redirigir a confirmación
       const u = new URL(window.location.href);
       u.pathname = `/${slug}/book/confirm`;
       u.searchParams.set("bookingId", bookingId);
@@ -132,8 +139,10 @@ export default function BookPage({ params }: { params: { workspace: string } }) 
   return (
     <section className="space-y-6">
       <h2 className="text-2xl font-semibold">Reservar</h2>
+
       {loadingMeta && <p>Cargando...</p>}
       {error && <p className="text-red-600 text-sm">{error}</p>}
+
       {meta && (
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-4">
