@@ -5,6 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+// --- Supabase admin client (SERVICE ROLE) ---
 function admin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -13,11 +14,13 @@ function admin() {
   });
 }
 
+// --- Simple auth con CRON_SECRET en query ?key= ---
 function authOk(req: Request) {
   const key = new URL(req.url).searchParams.get('key') ?? '';
   return key && key === process.env.CRON_SECRET;
 }
 
+// --- Quick ping para probar key ---
 export async function GET(req: Request) {
   if (!authOk(req)) {
     return NextResponse.json({ ok: false, error: 'unauthorized', method: 'GET' }, { status: 401 });
@@ -25,12 +28,14 @@ export async function GET(req: Request) {
   return NextResponse.json({ ok: true, method: 'GET' });
 }
 
+// --- Tipado de body ---
 type Body = {
   workspaceSlug: string;
   name: string;
   durationMin: number;
   priceUsd: number;
-  depositType: 'fixed' | 'percent';
+  // lo dejamos como string genérico para permitir 'fixed' | 'percent' | 'FIXED' | 'PERCENT'
+  depositType?: string;
   depositValue: number;
   provider?: string | null;
 };
@@ -63,7 +68,7 @@ export async function POST(req: Request) {
 
   const supa = admin();
 
-  // 1) Buscar workspace
+  // 1) Workspace
   const { data: ws, error: eWs } = await supa
     .from('workspaces')
     .select('id')
@@ -74,20 +79,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'workspace not found' }, { status: 404 });
   }
 
-  // 2) (opcional) upsert de provider por nombre
+  // 2) (opcional) provider por nombre
   let providerId: string | null = null;
   if (provider && provider.trim()) {
     const nameClean = provider.trim();
 
-    const { data: provExisting } = await supa
+    const { data: provExisting, error: eSel } = await supa
       .from('providers')
       .select('id')
       .eq('workspace_id', ws.id)
       .ilike('name', nameClean)
-      .maybeSingle();
+      .limit(1);
 
-    if (provExisting?.id) {
-      providerId = provExisting.id;
+    if (eSel) {
+      return NextResponse.json(
+        { ok: false, error: 'provider select failed', details: eSel.message },
+        { status: 500 }
+      );
+    }
+
+    if (provExisting && provExisting.length > 0) {
+      providerId = provExisting[0].id;
     } else {
       const { data: provIns, error: eProv } = await supa
         .from('providers')
@@ -107,8 +119,11 @@ export async function POST(req: Request) {
 
   // 3) Insert del servicio
   const price_cents = Math.round(Number(priceUsd || 0) * 100);
+
+  // ⚠️ FIX: normalizamos a minúsculas y comparamos solo con 'percent'
   const depType =
-    depositType === 'percent' || depositType === 'PERCENT' ? 'PERCENT' : 'FIXED';
+    String(depositType ?? 'fixed').toLowerCase() === 'percent' ? 'PERCENT' : 'FIXED';
+
   const depValue = Number(depositValue || 0);
   const duration_min = Number(durationMin || 0);
 
@@ -133,7 +148,7 @@ export async function POST(req: Request) {
     );
   }
 
-  // 4) (best-effort) enlazar provider ⇄ service si existe tabla puente
+  // 4) Enlazar provider-servicio si existe la tabla (best-effort)
   if (providerId) {
     try {
       await supa.from('provider_services').insert({
@@ -141,8 +156,9 @@ export async function POST(req: Request) {
         provider_id: providerId,
         service_id: svc.id,
       });
-      // si la tabla no existe, ignoramos el error
-    } catch {}
+    } catch {
+      // si la tabla no existe, lo ignoramos
+    }
   }
 
   return NextResponse.json({
